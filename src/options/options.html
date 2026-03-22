@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ollama Browser Control — Settings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./options.css">
+</head>
+
+<body>
+  <main class="page">
+    <header class="page-header">
+      <div class="logo-icon" aria-hidden="true">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+        </svg>
+      </div>
+      <div>
+        <p class="eyebrow">Configuration</p>
+        <h1>Ollama Browser Control</h1>
+        <p class="subtitle">Set your Ollama endpoint, model, approvals, and site allowlist.</p>
+      </div>
+    </header>
+
+    <!-- Launch Card -->
+    <section class="launch-card">
+      <div class="launch-content">
+        <div class="launch-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+        </div>
+        <div>
+          <h2>Open Browser Agent</h2>
+          <p class="launch-desc">Runs in Chrome's right sidebar next to the current page.</p>
+        </div>
+      </div>
+      <button id="open-agent" class="primary-button" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+          <polyline points="15 3 21 3 21 9" />
+          <line x1="10" y1="14" x2="21" y2="3" />
+        </svg>
+        Launch
+      </button>
+    </section>
+
+    <!-- Settings Form -->
+    <form id="settings-form" class="settings-form">
+
+      <!-- Connection Section -->
+      <div class="form-section">
+        <div class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+          <h3>Connection</h3>
+        </div>
+
+        <label>
+          <span>Base URL</span>
+          <input id="base-url" type="url" placeholder="http://127.0.0.1:11434">
+        </label>
+
+        <label>
+          <span>API Key</span>
+          <input id="api-key" type="password" placeholder="Optional unless you use a remote endpoint">
+        </label>
+      </div>
+
+      <!-- Model Section -->
+      <div class="form-section">
+        <div class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+          </svg>
+          <h3>Model</h3>
+        </div>
+
+        <label>
+          <span>Model</span>
+          <div class="model-picker">
+            <select id="model-select"></select>
+            <button id="refresh-models" class="ghost-button small" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+              </svg>
+              Refresh
+            </button>
+          </div>
+          <input id="model-custom" type="text" placeholder="Custom model name if needed" disabled>
+          <p class="field-help">Dropdown is populated from models already downloaded to your Ollama endpoint.</p>
+        </label>
+      </div>
+
+      <!-- Behavior Section -->
+      <div class="form-section">
+        <div class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path
+              d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
+          </svg>
+          <h3>Behavior</h3>
+        </div>
+
+        <label>
+          <span>Approval mode</span>
+          <select id="approval-mode">
+            <option value="manual">Manual approval for mutating actions</option>
+            <option value="auto">Automatic execution (approve all)</option>
+          </select>
+        </label>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="sensitive-warnings" checked>
+          <label for="sensitive-warnings">
+            <span>Always warn on sensitive actions</span>
+            <p class="field-help">Show approval prompts for purchases, deletions, and account changes even in auto mode.
+            </p>
+          </label>
+        </div>
+      </div>
+
+      <!-- Safety Section -->
+      <div class="form-section">
+        <div class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+          <h3>Safety &amp; Permissions</h3>
+        </div>
+
+        <label>
+          <span>Allowed origins</span>
+          <textarea id="allowed-origins" rows="4" placeholder="Leave blank to allow all sites. One origin per line:
+https://mail.google.com
+github.com
+*.example.com"></textarea>
+          <p class="field-help">Restricts which websites the agent can interact with. Leave empty to allow all.</p>
+        </label>
+      </div>
+
+      <!-- Advanced Section -->
+      <details class="form-section collapsible">
+        <summary class="section-title clickable">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </svg>
+          <h3>Advanced</h3>
+        </summary>
+
+        <div class="advanced-grid">
+          <label>
+            <span>Max iterations</span>
+            <input id="max-iterations" type="number" min="2" max="30">
+          </label>
+
+          <label>
+            <span>Temperature</span>
+            <input id="temperature" type="number" min="0" max="2" step="0.1">
+          </label>
+
+          <label>
+            <span>Request timeout (ms)</span>
+            <input id="request-timeout" type="number" min="5000" max="600000" step="1000">
+          </label>
+
+          <label>
+            <span>Retry attempts</span>
+            <input id="retry-attempts" type="number" min="0" max="5">
+          </label>
+        </div>
+
+        <label>
+          <span>Keep alive</span>
+          <input id="keep-alive" type="text" placeholder="10m">
+        </label>
+      </details>
+
+      <!-- Actions -->
+      <div class="form-actions">
+        <button class="primary-button" type="submit">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          Save settings
+        </button>
+        <button id="test-button" class="ghost-button" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+          </svg>
+          Test connection
+        </button>
+      </div>
+
+      <div id="status" class="status-message"></div>
+    </form>
+
+    <!-- Audit Log Section -->
+    <section class="audit-section">
+      <div class="section-header">
+        <div class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+          </svg>
+          <h3>Audit Log</h3>
+        </div>
+        <div class="section-actions">
+          <button id="refresh-audit" class="ghost-button small" type="button">Refresh</button>
+          <button id="clear-audit" class="ghost-button small danger" type="button">Clear</button>
+          <button id="export-audit" class="ghost-button small" type="button">Export</button>
+        </div>
+      </div>
+      <div id="audit-log" class="audit-log">
+        <p class="empty-text">No audit entries yet.</p>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./options.js"></script>
+</body>
+
+</html>

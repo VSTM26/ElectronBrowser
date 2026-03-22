@@ -1,0 +1,16 @@
+{
+  "name": "ollama-browser-control",
+  "productName": "Electron",
+  "private": true,
+  "version": "0.2.0",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "desktop": "electron desktop/main.cjs",
+    "desktop:smoke": "BROWSER_SMOKE_TEST=1 electron desktop/main.cjs",
+    "verify:e2e": "node scripts/verify-browser-control.mjs"
+  },
+  "dependencies": {
+    "electron": "^38.0.0",
+    "puppeteer-core": "^24.7.2"
+  }
+}

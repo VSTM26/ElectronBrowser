@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: http: https:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self' http: https: ws: wss:;">
+    <title>Electron</title>
+    <link rel="icon" href="./assets/electron-logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body>
+    <div id="window-shell" class="window-shell">
+      <div id="intro-overlay" class="intro-overlay" aria-hidden="true">
+        <div class="intro-storm">
+          <span class="lightning lightning-a"></span>
+          <span class="lightning lightning-b"></span>
+          <span class="lightning lightning-c"></span>
+          <span class="dust dust-a"></span>
+          <span class="dust dust-b"></span>
+          <span class="dust dust-c"></span>
+        </div>
+        <div class="intro-wordmark">
+          <img class="intro-logo" src="./assets/electron-logo.svg" alt="">
+          <div class="intro-copy">
+            <p class="eyebrow">Ignition sequence</p>
+            <h1>Electron</h1>
+            <p>Local-first browser booting with Ollama on deck.</p>
+          </div>
+        </div>
+      </div>
+
+      <header class="browser-chrome">
+        <div class="chrome-top">
+          <div class="brand-lockup">
+            <img class="brand-mark" src="./assets/electron-logo.svg" alt="Electron logo">
+            <div>
+              <p class="brand-title">Electron</p>
+              <p id="app-version" class="brand-version">Desktop shell</p>
+            </div>
+          </div>
+
+          <button id="toggle-agent-button" class="secondary-button" type="button" aria-pressed="true">
+            Hide assistant
+          </button>
+        </div>
+
+        <div class="tab-strip">
+          <div id="tabs" class="tabs" role="tablist" aria-label="Browser tabs"></div>
+          <button id="new-tab-button" class="icon-button" type="button" title="New tab">+</button>
+        </div>
+
+        <form id="address-form" class="toolbar" autocomplete="off">
+          <div class="nav-actions">
+            <button id="back-button" class="icon-button" type="button" title="Back">&#8592;</button>
+            <button id="forward-button" class="icon-button" type="button" title="Forward">&#8594;</button>
+            <button id="reload-button" class="icon-button" type="button" title="Reload">&#8635;</button>
+            <button id="home-button" class="icon-button" type="button" title="Home">&#8962;</button>
+          </div>
+
+          <label class="address-shell" for="address-input">
+            <span class="address-chip">Search</span>
+            <input
+              id="address-input"
+              class="address-input"
+              type="text"
+              spellcheck="false"
+              placeholder="Search Google or enter address"
+            >
+          </label>
+
+          <button class="primary-button" type="submit">Go</button>
+        </form>
+      </header>
+
+      <main class="workspace">
+        <section class="page-pane">
+          <div class="browser-context">
+            <span id="active-page-label">No page loaded yet.</span>
+          </div>
+          <div id="browser-stack" class="browser-stack"></div>
+        </section>
+
+        <aside id="agent-pane" class="agent-pane">
+          <div class="agent-scroll">
+            <section class="agent-card hero-card">
+              <div class="hero-copy">
+                <p class="eyebrow">Electron Browser</p>
+                <h1>Local-first browsing with an Ollama-powered assistant.</h1>
+                <p>Use the browser normally, then hand off tasks to the assistant when you want help driving the page.</p>
+              </div>
+            </section>
+
+            <section class="agent-card status-card">
+              <div class="status-row">
+                <span id="status-pill" class="status-pill idle">Idle</span>
+                <span id="step-indicator" class="step-indicator">Ready</span>
+              </div>
+              <p id="status-copy" class="status-copy">Waiting for a task.</p>
+            </section>
+
+            <form id="task-form" class="agent-card composer-card">
+              <div class="card-header">
+                <div>
+                  <p class="eyebrow">Assistant</p>
+                  <h2>Task</h2>
+                </div>
+              </div>
+
+              <label class="field-label" for="task-input">What should the browser do?</label>
+              <textarea id="task-input" rows="5" placeholder="Try: open github.com, inspect the page, and tell me the first primary call to action."></textarea>
+
+              <div class="task-actions">
+                <button id="run-task-button" class="primary-button" type="submit">Run task</button>
+                <button id="stop-task-button" class="secondary-button" type="button" disabled>Stop</button>
+              </div>
+            </form>
+
+            <section class="agent-card settings-card">
+              <div class="card-header">
+                <div>
+                  <p class="eyebrow">Ollama</p>
+                  <h2>Connection</h2>
+                </div>
+                <div class="header-actions">
+                  <button id="refresh-models-button" class="secondary-button compact" type="button">Refresh</button>
+                  <button id="test-connection-button" class="secondary-button compact" type="button">Test</button>
+                </div>
+              </div>
+
+              <label class="field-label" for="base-url-input">Base URL</label>
+              <input id="base-url-input" class="text-input" type="text" value="http://127.0.0.1:11434">
+
+              <label class="field-label" for="api-key-input">API key</label>
+              <input id="api-key-input" class="text-input" type="password" placeholder="Optional">
+
+              <label class="field-label" for="model-select">Model</label>
+              <select id="model-select" class="text-input"></select>
+
+              <div class="settings-grid">
+                <div>
+                  <label class="field-label" for="temperature-input">Temperature</label>
+                  <input id="temperature-input" class="text-input" type="number" min="0" max="2" step="0.1" value="0.2">
+                </div>
+                <div>
+                  <label class="field-label" for="iterations-input">Max steps</label>
+                  <input id="iterations-input" class="text-input" type="number" min="2" max="30" step="1" value="10">
+                </div>
+              </div>
+
+              <button id="save-settings-button" class="primary-button wide" type="button">Save settings</button>
+              <p id="settings-feedback" class="feedback">Settings are stored locally in this browser.</p>
+            </section>
+
+            <section class="agent-card activity-card">
+              <div class="card-header">
+                <div>
+                  <p class="eyebrow">Activity</p>
+                  <h2>Decision trace</h2>
+                </div>
+                <button id="clear-logs-button" class="secondary-button compact" type="button">Clear</button>
+              </div>
+              <ul id="logs" class="logs"></ul>
+            </section>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

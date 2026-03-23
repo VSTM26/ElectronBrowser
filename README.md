@@ -1,207 +1,191 @@
-# ClaudeControl
+# ElectronBrowser
 
-Chrome extension for an Ollama-powered browser agent that runs in Chrome's right side panel, keeps the page visible on the left, and can inspect pages, type, click, navigate, search, and execute multi-step web tasks.
+Local-first browser shell with an Ollama-powered assistant built into the right rail.
 
-This repo now also includes a desktop browser shell under `desktop/` so the project can move past Chrome extension limits and toward a more Comet-like, AI-native browsing experience powered by local Ollama models.
+The main product in this repo is the desktop Electron browser under `desktop/`. It gives you:
 
-## End Goal
+- a normal browser-style shell with tabs, navigation, address bar, and browsing surface
+- a built-in assistant chat panel on the right
+- direct local Ollama integration through the Electron main process
+- browser actions such as inspect, click, type, hover, scroll, navigate, and tab control
+- conversational help like:
+  - "summarize this page"
+  - "explain what you see"
+  - "click the Sign in button"
+  - "open github.com and tell me the main call to action"
 
-Build the closest practical thing to an AI-native browser assistant inside Chrome:
+The older Chrome extension prototype is still in this repo under `src/`, but the desktop browser is the primary direction now.
 
-- always available from the right side panel
-- aware of the active tab, visible page state, and open tabs
-- able to inspect, navigate, type, click, scroll, select, hover, and move a visible cursor
-- transparent about what it is doing through logs, decision traces, and approval gates
-- powered by local or self-hosted Ollama-compatible models instead of a hosted closed model
-
-This project is not aiming for literal 100% control of Chrome. Chrome extensions cannot directly control `chrome://` pages, native permission prompts, extension pages, or operating-system UI. The goal is maximum useful control inside the boundaries Chrome allows.
-
-## Current State
+## Current Status
 
 Working now:
 
-- Chrome side panel agent UI
-- desktop browser shell with a real browsing surface on the left and agent rail on the right
-- Ollama endpoint configuration and installed-model selection
-- tab-aware browser tools
-- DOM inspection and action execution
-- activity log and safe reasoning summaries
-- end-to-end browser-control verification
-- visible on-page cursor movement for agent actions
+- desktop browser shell with tabs and navigation
+- assistant chat UI in the right rail
+- local Ollama model selection and connection testing
+- page inspection and browser control tools
+- visible cursor for page actions
+- assistant rail scrollbar plus up/down scroll buttons
+- smoke-tested desktop startup flow
 
-Still incomplete:
+Still in progress:
 
-- screenshot-grounded vision loop
-- long-horizon planning across many tabs
-- robust workflow memory and saved procedures
-- stronger recovery logic for dynamic sites
-- polished AI-native browser UX comparable to a full custom browser
+- screenshot-grounded vision
+- richer memory across long browsing sessions
+- more robust recovery on messy dynamic sites
+- deeper browser features like downloads/history polish
 
-## Comet Comparison
+## How To Set Up
 
-This extension is being shaped toward the feel of products like Perplexity Comet, but it is still a Chrome extension, not a browser fork.
+### 1. Clone the repo
 
-Where we want to feel similar:
+```bash
+git clone https://github.com/VSTM26/ElectronBrowser
+cd ElectronBrowser
+```
 
-- assistant-first browsing instead of a separate chatbot tab
-- persistent right-rail workflow
-- natural-language tasks that turn into browser actions
-- clear awareness of the current page and browsing context
-- faster “search, inspect, act” loops
-
-Where a Chrome extension is naturally weaker than a custom browser:
-
-- less access to browser internals
-- weaker control over native browser UI
-- more friction around permissions and restricted pages
-- fewer deep hooks for cross-tab memory and navigation primitives
-
-So the target is not “be Comet in name.” The target is “deliver the most Comet-like workflow we can inside stock Chrome.”
-
-## Product Plan
-
-### Phase 1: Reliable Browser Control
-
-Goal: make every basic browser action dependable and visible.
-
-- keep the control loop stable with Ollama-compatible models
-- expand deterministic page tooling
-- maintain the visible cursor and target highlighting
-- improve error reporting when a page is restricted or a model call fails
-- keep end-to-end verification passing on every major change
-
-Success criteria:
-
-- simple tasks like search, open site, type, click, and submit work consistently
-- users can see where the agent is about to act
-- failures are diagnosable from the side panel alone
-
-### Phase 2: Comet-Style UX
-
-Goal: make the extension feel less like a developer tool and more like an AI-native browser assistant.
-
-- simplify the side panel hierarchy
-- improve typography, spacing, and action affordances
-- keep current page context obvious at all times
-- show intent, next action, and approvals more clearly
-- make logs expandable instead of noisy
-
-Success criteria:
-
-- tasks feel understandable while they run
-- activity feed is readable without squinting
-- common flows need fewer manual refreshes or context switches
-
-### Phase 3: Better Grounding
-
-Goal: make the agent smarter on modern websites.
-
-- add screenshot capture into the action loop
-- combine DOM inspection with visual grounding
-- detect ambiguous targets and ask for confirmation when needed
-- improve dynamic-site handling for SPAs and delayed rendering
-
-Success criteria:
-
-- the agent can recover on pages where DOM labels alone are weak
-- targeting accuracy improves on visually complex layouts
-
-### Phase 4: Durable Workflows
-
-Goal: support repeatable real-world tasks.
-
-- saved workflows and reusable task templates
-- structured session memory
-- better multi-tab coordination
-- resumable execution after navigation
-
-Success criteria:
-
-- users can re-run frequent tasks without rewriting prompts
-- long tasks survive tab changes and normal browsing interruptions
-
-## Technical Direction
-
-Core pieces in this repo:
-
-- `src/background/`
-  background orchestration, Ollama client, browser tools, task runner
-- `src/content/`
-  page inspection, DOM actions, visible cursor, target highlighting
-- `src/sidepanel/`
-  agent UI, activity feed, reasoning summaries
-- `src/options/`
-  endpoint/model configuration
-- `scripts/verify-browser-control.mjs`
-  end-to-end control verification in real Chrome
-
-Design principles:
-
-- show actions, do not hide them
-- default to reversible operations when possible
-- prefer deterministic tools over free-form guessing
-- keep the model replaceable
-- verify real browser behavior, not just internal state
-
-## Recommended Near-Term Work
-
-Highest-value next steps:
-
-1. Add screenshot-grounded action selection.
-2. Make the side panel more like a task cockpit than a log viewer.
-3. Add richer cursor interactions such as drag, explicit mouse move, and element focus previews.
-4. Improve approval flows for sensitive forms and submission buttons.
-5. Test against a wider set of real websites with saved fixtures.
-
-## Run The Desktop Browser
-
-Install dependencies:
+### 2. Install dependencies
 
 ```bash
 npm install
 ```
 
-Start the desktop browser shell:
+This downloads Electron and the local dev dependencies.
+
+### 3. Start Ollama
+
+Make sure Ollama is installed and running locally.
+
+Example:
+
+```bash
+ollama serve
+```
+
+In another terminal, make sure you have at least one model downloaded:
+
+```bash
+ollama pull qwen3:latest
+```
+
+The desktop browser defaults to:
+
+- Base URL: `http://127.0.0.1:11434`
+- Model: `qwen3:latest`
+
+### 4. Launch the desktop browser
 
 ```bash
 npm run desktop
 ```
 
-Smoke-test that the browser shell boots:
+If you are working from a cloud-synced folder and want to stage the app into a local cache first, you can also use:
+
+```bash
+./launch-electron-local.command
+```
+
+## First Run
+
+Once the browser opens:
+
+1. Open the right assistant rail if it is collapsed.
+2. Scroll to the `Ollama / Connection` card.
+3. Confirm the base URL and model.
+4. Click `Test`.
+5. Start chatting in the assistant panel.
+
+Good first prompts:
+
+- `Summarize this page`
+- `Explain what you see on this page`
+- `Inspect the page and tell me the primary call to action`
+- `Click the first sign in button`
+- `Open github.com in this tab`
+
+## Development Commands
+
+Launch the desktop browser:
+
+```bash
+npm run desktop
+```
+
+Run the desktop smoke test:
 
 ```bash
 npm run desktop:smoke
 ```
 
-## Verification
-
-The repo includes an end-to-end verifier that launches Chrome, loads the extension, issues a natural-language browser task, and confirms the page changed because of the extension’s actions.
-
-Run:
+Run the Chrome-extension end-to-end verifier:
 
 ```bash
 npm run verify:e2e
 ```
 
-For local Ollama use, make sure Ollama is running with extension-safe CORS:
+Note:
+- `desktop:smoke` tests the Electron browser shell.
+- `verify:e2e` is for the older Chrome extension flow, not the desktop shell.
+
+## Repo Layout
+
+- `desktop/`
+  Electron main process, preload bridge, browser shell UI, and page agent logic
+- `src/`
+  legacy Chrome extension prototype
+- `scripts/verify-browser-control.mjs`
+  end-to-end Chrome extension verification script
+- `setup.sh`
+  helper script for Ollama setup and extension-safe CORS
+
+## Ollama Notes
+
+For the desktop browser, Ollama requests go through Electron's main process, so browser CORS is not the main issue.
+
+For the Chrome extension and the extension verifier, you may still need Ollama CORS enabled. This helper sets that up:
+
+```bash
+./setup.sh
+```
+
+You can also run Ollama manually with:
 
 ```bash
 OLLAMA_ORIGINS="*" ollama serve
 ```
 
-Then configure the extension with:
+## What The Assistant Can Do
 
-- Base URL: `http://127.0.0.1:11434`
-- API key: blank
-- Model: one of your installed Ollama models such as `qwen3:latest`
+The assistant can mix normal chat with browser actions in the same thread.
+
+Examples:
+
+- answer questions about the active page
+- summarize visible content
+- inspect interactive elements before acting
+- click buttons and links
+- type into forms
+- open tabs and navigate between pages
+- search Google when given a plain-language query
+
+The goal is not a separate chatbot tab. The goal is an assistant that can both talk about the page and operate it.
+
+## Near-Term Direction
+
+The next major improvements are:
+
+1. Better grounding with screenshots plus DOM context.
+2. Stronger real-world task reliability on dynamic websites.
+3. More browser-native polish in the desktop shell.
+4. Better conversation memory and reusable workflows.
 
 ## Reality Check
 
-This project can get very close to the experience of an AI-native browser assistant, but the hard parts are not just UI polish. The real quality bar is:
+This is already beyond a simple extension demo, but it is not yet a finished AI-native browser. The hard part is reliability on real sites, not just UI.
 
-- reliable tool selection
-- visible and trustworthy actions
-- recovery from messy real websites
-- enough grounding that users trust it on live tasks
+The main bar for this repo is:
 
-That is the work ahead, and that is what this repo is now organized around.
+- useful local browsing assistance
+- visible, trustworthy actions
+- clean browser ergonomics
+- free local Ollama-powered workflows

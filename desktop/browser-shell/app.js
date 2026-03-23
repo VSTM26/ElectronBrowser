@@ -3,6 +3,7 @@ import { createPageCommandScript } from "./page-agent.js";
 const runtimeParams = new URLSearchParams(window.location.search);
 const bootMode = runtimeParams.get("bootMode") || "normal";
 const START_PAGE_URL = new URL("./new-tab.html", window.location.href).toString();
+const START_PAGE_DISPLAY_URL = "electron://new-tab";
 
 const DEFAULT_SETTINGS = {
   baseUrl: "http://127.0.0.1:11434",
@@ -86,11 +87,12 @@ const TOOL_DEFINITIONS = [
 
 const SYSTEM_PROMPT = [
   "You are an autonomous browser operator inside a local desktop browser shell.",
-  "Complete the user's task by using the available tools. Inspect the page before taking actions.",
+  "The user may ask for browser actions, summaries, explanations, or help understanding what is on the current page.",
+  "Complete the user's request by using the available tools. Inspect the page before taking actions, and inspect before answering questions about what is visible.",
   "A visible cursor appears during movement, hover, typing, and click actions. Use it deliberately so the user can follow what will happen next.",
   "Never invent element ids or tab ids. Use tool outputs exactly as returned.",
   "Keep actions small and verifiable. Re-inspect after navigation or major actions.",
-  "When the task is complete, respond with a concise summary and any important caveats."
+  "Respond conversationally and clearly. When the request is complete, answer like a helpful assistant and include any important caveats."
 ].join(" ");
 
 const elements = {
@@ -109,10 +111,14 @@ const elements = {
   browserStack: document.getElementById("browser-stack"),
   activePageLabel: document.getElementById("active-page-label"),
   agentPane: document.getElementById("agent-pane"),
+  agentScrollUpButton: document.getElementById("agent-scroll-up-button"),
+  agentScrollDownButton: document.getElementById("agent-scroll-down-button"),
   statusPill: document.getElementById("status-pill"),
   stepIndicator: document.getElementById("step-indicator"),
   statusCopy: document.getElementById("status-copy"),
   taskForm: document.getElementById("task-form"),
+  conversation: document.getElementById("conversation"),
+  clearConversationButton: document.getElementById("clear-conversation-button"),
   taskInput: document.getElementById("task-input"),
   runTaskButton: document.getElementById("run-task-button"),
   stopTaskButton: document.getElementById("stop-task-button"),
@@ -134,6 +140,7 @@ const state = {
   preferences: loadPreferences(),
   tabs: [],
   activeTabId: null,
+  conversation: loadConversation(),
   running: false,
   abortRequested: false,
   currentTask: "",
@@ -165,6 +172,8 @@ async function boot() {
     startIntroAnimation();
     const appInfo = await window.desktopBridge.getAppInfo();
     elements.appVersion.textContent = `${appInfo.name} v${appInfo.version}`;
+    document.body.dataset.platform = appInfo.platform || "unknown";
+    elements.windowShell.classList.toggle("platform-darwin", appInfo.platform === "darwin");
 
     await refreshModels({ silent: true });
     if (bootMode === "safe") {
@@ -191,6 +200,18 @@ function bindEvents() {
     persistPreferences();
     applyLayoutState();
   });
+  elements.agentScrollUpButton.addEventListener("click", () => {
+    scrollAgentPane(-1);
+  });
+  elements.agentScrollDownButton.addEventListener("click", () => {
+    scrollAgentPane(1);
+  });
+  elements.agentPane.addEventListener("scroll", () => {
+    updateAgentScrollButtons();
+  });
+  window.addEventListener("resize", () => {
+    window.requestAnimationFrame(updateAgentScrollButtons);
+  });
   elements.addressForm.addEventListener("submit", (event) => {
     event.preventDefault();
     navigateActiveTab(elements.addressInput.value);
@@ -203,9 +224,21 @@ function bindEvents() {
     event.preventDefault();
     await runAgentTask(elements.taskInput.value);
   });
+  elements.taskInput.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      void runAgentTask(elements.taskInput.value);
+    }
+  });
   elements.stopTaskButton.addEventListener("click", () => {
     state.abortRequested = true;
     pushLog("warn", "Stop requested. The task will halt after the current model call or tool action.");
+    renderState();
+  });
+  elements.clearConversationButton.addEventListener("click", () => {
+    state.conversation = [];
+    persistConversation();
+    state.lastResult = "Waiting for a task.";
     renderState();
   });
   elements.saveSettingsButton.addEventListener("click", () => {
@@ -457,8 +490,33 @@ function loadPreferences() {
   }
 }
 
+function loadConversation() {
+  try {
+    const raw = localStorage.getItem("desktopConversation");
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .filter((entry) => entry && (entry.role === "user" || entry.role === "assistant") && typeof entry.content === "string")
+      .map((entry) => ({
+        role: entry.role,
+        content: entry.content,
+        timestamp: entry.timestamp || new Date().toISOString()
+      }))
+      .slice(-24);
+  } catch {
+    return [];
+  }
+}
+
 function persistSettings() {
   localStorage.setItem("desktopSettings", JSON.stringify(state.settings));
+}
+
+function persistConversation() {
+  localStorage.setItem("desktopConversation", JSON.stringify(state.conversation));
 }
 
 function restoreSession() {
@@ -543,6 +601,28 @@ function applyLayoutState() {
   elements.windowShell.classList.toggle("agent-collapsed", state.preferences.agentPaneOpen === false);
   elements.toggleAgentButton.textContent = state.preferences.agentPaneOpen ? "Hide assistant" : "Show assistant";
   elements.toggleAgentButton.setAttribute("aria-pressed", state.preferences.agentPaneOpen ? "true" : "false");
+  window.requestAnimationFrame(updateAgentScrollButtons);
+}
+
+function getAgentScrollStep() {
+  return Math.max(240, Math.round(elements.agentPane.clientHeight * 0.72));
+}
+
+function scrollAgentPane(direction) {
+  const delta = direction * getAgentScrollStep();
+  elements.agentPane.scrollBy({ top: delta, behavior: "auto" });
+  window.requestAnimationFrame(updateAgentScrollButtons);
+}
+
+function updateAgentScrollButtons() {
+  const pane = elements.agentPane;
+  const maxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
+  const atTop = pane.scrollTop <= 1;
+  const atBottom = maxScroll <= 1 || pane.scrollTop >= maxScroll - 1;
+  const paneOpen = state.preferences.agentPaneOpen !== false;
+
+  elements.agentScrollUpButton.disabled = !paneOpen || atTop;
+  elements.agentScrollDownButton.disabled = !paneOpen || atBottom;
 }
 
 async function refreshModels({ silent }) {
@@ -599,7 +679,7 @@ function setFeedback(message, tone) {
 
 function syncAddressBar() {
   const tab = getActiveTab();
-  elements.addressInput.value = tab?.url || "";
+  elements.addressInput.value = formatDisplayUrl(tab?.url || "");
 }
 
 function updateBrowserContext() {
@@ -609,9 +689,10 @@ function updateBrowserContext() {
     return;
   }
 
+  const displayUrl = formatDisplayUrl(tab.url || "");
   elements.activePageLabel.textContent = tab.loading
-    ? `Loading ${tab.url || tab.title || "page"}...`
-    : `${tab.title || "Untitled"} · ${tab.url || ""}`;
+    ? `Loading ${displayUrl || tab.title || "page"}...`
+    : `${tab.title || "Untitled"} · ${displayUrl}`;
 
   elements.backButton.disabled = !(tab.domReady && tab.webview?.canGoBack?.());
   elements.forwardButton.disabled = !(tab.domReady && tab.webview?.canGoForward?.());
@@ -685,21 +766,13 @@ async function runAgentTask(taskValue) {
   state.currentTask = task;
   state.lastResult = "Working through the current task.";
   state.currentStep = { step: 0, total: state.settings.maxIterations, label: "starting" };
+  appendConversation("user", task);
+  elements.taskInput.value = "";
   renderState();
 
-  pushLog("info", `Queued task: ${task}`);
+  pushLog("info", `Queued message: ${task}`);
 
-  const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        `Task: ${task}`,
-        "You are operating a live browser with tabs on the left and an agent rail on the right.",
-        "Inspect the page before clicking or typing, and verify each meaningful action."
-      ].join("\n")
-    }
-  ];
+  const messages = buildConversationMessages();
 
   try {
     for (let step = 1; step <= state.settings.maxIterations; step += 1) {
@@ -735,6 +808,7 @@ async function runAgentTask(taskValue) {
         state.running = false;
         state.currentStep = null;
         state.lastResult = assistantMessage.content;
+        appendConversation("assistant", assistantMessage.content);
         pushLog("success", assistantMessage.content);
         renderState();
         return;
@@ -782,6 +856,7 @@ async function runAgentTask(taskValue) {
     throw new Error(`Stopped after ${state.settings.maxIterations} steps without a final answer.`);
   } catch (error) {
     state.lastResult = error.message;
+    appendConversation("assistant", `I ran into an error while working on that: ${error.message}`);
     pushLog("error", error.message);
   } finally {
     state.running = false;
@@ -1146,9 +1221,49 @@ function summarizeToolResult(name, result) {
   return `${name}: completed.`;
 }
 
+function buildConversationMessages() {
+  const tab = getActiveTab();
+  const activeTabLine = tab
+    ? `Active tab right now: ${tab.title || "Untitled"} (${formatDisplayUrl(tab.url || "") || "no url"}).`
+    : "No active tab is available.";
+
+  const conversationMessages = state.conversation.map((entry, index) => {
+    if (entry.role !== "user") {
+      return {
+        role: "assistant",
+        content: entry.content
+      };
+    }
+
+    if (index === state.conversation.length - 1) {
+      return {
+        role: "user",
+        content: [
+          entry.content,
+          "",
+          activeTabLine,
+          "Use browser tools when you need page facts or actions.",
+          "If I ask what you see or ask for a summary, inspect the page first."
+        ].join("\n")
+      };
+    }
+
+    return {
+      role: "user",
+      content: entry.content
+    };
+  });
+
+  return [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...conversationMessages
+  ];
+}
+
 function renderState() {
   elements.runTaskButton.disabled = state.running;
   elements.stopTaskButton.disabled = !state.running;
+  elements.clearConversationButton.disabled = state.running || !state.conversation.length;
   elements.statusPill.textContent = state.running ? "Running" : "Idle";
   elements.statusPill.className = `status-pill ${state.running ? "running" : "idle"}`;
   elements.stepIndicator.textContent = state.currentStep
@@ -1158,8 +1273,45 @@ function renderState() {
     ? state.currentTask || "Working through the current task."
     : state.lastResult || "Waiting for a task.";
   renderTabs();
+  renderConversation();
   renderLogs();
   updateBrowserContext();
+  window.requestAnimationFrame(updateAgentScrollButtons);
+}
+
+function renderConversation() {
+  elements.conversation.textContent = "";
+
+  if (!state.conversation.length) {
+    const empty = document.createElement("div");
+    empty.className = "conversation-empty";
+    empty.textContent = "Chat directly with the assistant here. Ask it to summarize the page, explain what it sees, or take browser actions for you.";
+    elements.conversation.append(empty);
+    return;
+  }
+
+  for (const entry of state.conversation) {
+    const row = document.createElement("div");
+    row.className = `conversation-message ${entry.role}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = "conversation-bubble";
+
+    const meta = document.createElement("div");
+    meta.className = "conversation-meta";
+    meta.textContent = `${entry.role === "user" ? "You" : "Assistant"} · ${formatTime(entry.timestamp)}`;
+
+    const content = document.createElement("div");
+    content.textContent = entry.content;
+
+    bubble.append(meta, content);
+    row.append(bubble);
+    elements.conversation.append(row);
+  }
+
+  window.requestAnimationFrame(() => {
+    elements.conversation.scrollTop = elements.conversation.scrollHeight;
+  });
 }
 
 function renderLogs() {
@@ -1208,6 +1360,25 @@ function pushLog(level, message) {
   renderState();
 }
 
+function appendConversation(role, content) {
+  const text = String(content || "").trim();
+  if (!text) {
+    return;
+  }
+
+  state.conversation.push({
+    role: role === "user" ? "user" : "assistant",
+    content: text,
+    timestamp: new Date().toISOString()
+  });
+
+  if (state.conversation.length > 24) {
+    state.conversation = state.conversation.slice(-24);
+  }
+
+  persistConversation();
+}
+
 function ensureNotCancelled() {
   if (state.abortRequested) {
     throw new Error("Stopped by user.");
@@ -1237,13 +1408,28 @@ function serializeTab(tab) {
     id: tab.id,
     title: tab.title || "",
     url: tab.url || "",
+    displayUrl: formatDisplayUrl(tab.url || ""),
     loading: tab.loading === true
   };
+}
+
+function formatDisplayUrl(value) {
+  const url = String(value || "");
+  if (!url) {
+    return "";
+  }
+  if (url === START_PAGE_URL) {
+    return START_PAGE_DISPLAY_URL;
+  }
+  return url;
 }
 
 function normalizeDestination(value) {
   const trimmed = String(value || "").trim();
   if (!trimmed) {
+    return START_PAGE_URL;
+  }
+  if (trimmed === START_PAGE_DISPLAY_URL) {
     return START_PAGE_URL;
   }
   if (trimmed === START_PAGE_URL || trimmed.startsWith("file://")) {

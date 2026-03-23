@@ -87,7 +87,8 @@ app.on("window-all-closed", () => {
 function registerIpcHandlers() {
   ipcMain.handle("app:get-info", () => ({
     name: "Electron",
-    version: app.getVersion()
+    version: app.getVersion(),
+    platform: process.platform
   }));
 
   ipcMain.handle("shell:open-external", async (_event, url) => {
@@ -169,16 +170,74 @@ async function runSmokeCheck() {
         hasShell: Boolean(document.querySelector(".window-shell")),
         hasTabs: Boolean(document.getElementById("tabs")),
         hasToolbar: Boolean(document.getElementById("address-form")),
-        hasBrowserStack: Boolean(document.getElementById("browser-stack"))
+        hasBrowserStack: Boolean(document.getElementById("browser-stack")),
+        hasAgentPane: Boolean(document.getElementById("agent-pane")),
+        hasConversation: Boolean(document.getElementById("conversation")),
+        hasComposer: Boolean(document.getElementById("task-form"))
       })
     `, true);
 
-    if (!summary.ready || !summary.hasShell || !summary.hasTabs || !summary.hasToolbar || !summary.hasBrowserStack) {
+    if (!summary.ready || !summary.hasShell || !summary.hasTabs || !summary.hasToolbar || !summary.hasBrowserStack || !summary.hasAgentPane || !summary.hasConversation || !summary.hasComposer) {
       throw new Error(`Smoke check failed: ${JSON.stringify(summary)}`);
+    }
+
+    const scrollSummary = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        const pane = document.getElementById("agent-pane");
+        const scrollContent = pane?.querySelector(".agent-scroll");
+        const upButton = document.getElementById("agent-scroll-up-button");
+        const downButton = document.getElementById("agent-scroll-down-button");
+        if (!pane || !scrollContent) {
+          return { ok: false, reason: "assistant rail missing" };
+        }
+        if (!upButton || !downButton) {
+          return { ok: false, reason: "assistant scroll buttons missing" };
+        }
+
+        const filler = document.createElement("div");
+        filler.style.height = "1200px";
+        filler.style.flex = "0 0 auto";
+        filler.dataset.smokeSpacer = "true";
+        scrollContent.appendChild(filler);
+
+        pane.scrollTop = 0;
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const startTop = pane.scrollTop;
+        const scrollHeight = pane.scrollHeight;
+        const clientHeight = pane.clientHeight;
+
+        downButton.click();
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const downTop = pane.scrollTop;
+
+        upButton.click();
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const upTop = pane.scrollTop;
+
+        const result = {
+          ok: scrollHeight > clientHeight && downTop > startTop && upTop < downTop,
+          startTop,
+          downTop,
+          upTop,
+          scrollHeight,
+          clientHeight,
+          hasButtons: true
+        };
+
+        filler.remove();
+        pane.scrollTop = 0;
+        return result;
+      })()
+    `, true);
+
+    if (!scrollSummary.ok) {
+      throw new Error(`Assistant rail scroll check failed: ${JSON.stringify(scrollSummary)}`);
     }
 
     console.log("Desktop shell loaded.");
     console.log(JSON.stringify(summary));
+    console.log(JSON.stringify({ assistantScroll: scrollSummary }));
   } catch (error) {
     console.error(`Desktop shell smoke check failed: ${error.message}`);
     process.exitCode = 1;

@@ -28,6 +28,7 @@
 html,
 body {
   margin: 0;
+  height: 100%;
   min-height: 100%;
 }
 
@@ -41,9 +42,11 @@ body {
 }
 
 .window-shell {
+  height: 100vh;
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .intro-overlay {
@@ -188,6 +191,11 @@ body {
   gap: 16px;
   padding-top: 10px;
   padding-bottom: 10px;
+  -webkit-app-region: drag;
+}
+
+.window-shell.platform-darwin .chrome-top {
+  padding-left: 92px;
 }
 
 .brand-lockup {
@@ -313,6 +321,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   font: inherit;
+  -webkit-app-region: no-drag;
 }
 
 .icon-button {
@@ -369,12 +378,14 @@ select {
   border-radius: 14px;
   color: var(--text);
   font: inherit;
+  -webkit-app-region: no-drag;
 }
 
 .address-shell {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   min-height: 48px;
   padding: 0 14px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
@@ -408,6 +419,12 @@ select {
   padding: 0 14px;
 }
 
+.address-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
 textarea {
   min-height: 120px;
   padding: 14px;
@@ -423,8 +440,10 @@ select:focus {
 
 .workspace {
   min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--agent-width);
+  overflow: hidden;
 }
 
 .window-shell.agent-collapsed .workspace {
@@ -472,11 +491,17 @@ select:focus {
 }
 
 .agent-pane {
+  position: relative;
   min-width: 0;
   min-height: 0;
   border-left: 1px solid var(--border);
   background: linear-gradient(180deg, #f5f7fb 0%, #eef3f8 100%);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(56, 103, 255, 0.42) rgba(15, 23, 42, 0.06);
 }
 
 .window-shell.agent-collapsed .agent-pane {
@@ -485,17 +510,49 @@ select:focus {
 }
 
 .agent-scroll {
-  height: 100%;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 14px 8px 14px 14px;
-  overflow-x: hidden;
-  overflow-y: scroll;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable both-edges;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(56, 103, 255, 0.42) rgba(15, 23, 42, 0.06);
+  padding: 14px 56px 88px 14px;
+}
+
+.agent-scroll-controls {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.agent-scroll-button {
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 18px;
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.12);
+  cursor: pointer;
+  pointer-events: auto;
+  backdrop-filter: blur(12px);
+}
+
+.agent-scroll-button:hover:not(:disabled) {
+  background: var(--surface-soft);
+}
+
+.agent-scroll-button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .agent-card {
@@ -573,6 +630,99 @@ select:focus {
   gap: 12px;
 }
 
+.composer-help {
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 220px;
+  max-height: 360px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.conversation::-webkit-scrollbar {
+  width: 10px;
+}
+
+.conversation::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.04);
+  border-radius: 999px;
+}
+
+.conversation::-webkit-scrollbar-thumb {
+  background: rgba(56, 103, 255, 0.28);
+  border-radius: 999px;
+}
+
+.conversation-message {
+  display: flex;
+}
+
+.conversation-message.user {
+  justify-content: flex-end;
+}
+
+.conversation-message.assistant,
+.conversation-message.system {
+  justify-content: flex-start;
+}
+
+.conversation-bubble {
+  max-width: 92%;
+  padding: 12px 14px;
+  border-radius: 16px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.conversation-message.user .conversation-bubble {
+  background: linear-gradient(180deg, rgba(56, 103, 255, 0.98), rgba(33, 79, 224, 0.98));
+  color: white;
+  border-color: rgba(56, 103, 255, 0.2);
+}
+
+.conversation-message.assistant .conversation-bubble {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.conversation-message.system .conversation-bubble {
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--text-soft);
+  border-style: dashed;
+}
+
+.conversation-meta {
+  margin-bottom: 6px;
+  color: inherit;
+  opacity: 0.7;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.conversation-empty {
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px dashed var(--border-strong);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -604,22 +754,22 @@ select:focus {
   overflow: visible;
 }
 
-.agent-scroll::-webkit-scrollbar {
+.agent-pane::-webkit-scrollbar {
   width: 14px;
 }
 
-.agent-scroll::-webkit-scrollbar-track {
+.agent-pane::-webkit-scrollbar-track {
   background: rgba(15, 23, 42, 0.04);
   border-radius: 999px;
 }
 
-.agent-scroll::-webkit-scrollbar-thumb {
+.agent-pane::-webkit-scrollbar-thumb {
   background: rgba(56, 103, 255, 0.34);
   border-radius: 999px;
   border: 2px solid rgba(255, 255, 255, 0.55);
 }
 
-.agent-scroll::-webkit-scrollbar-thumb:hover {
+.agent-pane::-webkit-scrollbar-thumb:hover {
   background: rgba(56, 103, 255, 0.5);
 }
 

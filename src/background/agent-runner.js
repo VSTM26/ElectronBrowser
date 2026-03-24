@@ -1,8 +1,10 @@
 import { executeBrowserTool, describeToolUse, isSensitiveAction } from "./browser-tools.js";
 import { chatWithOllama } from "./ollama-client.js";
-import { BROWSER_TOOLS } from "../shared/tool-schema.js";
+import { getBrowserTools, TOOL_RUNTIMES } from "../shared/tool-schema.js";
 import { MUTATING_TOOLS, SYSTEM_PROMPT, ERROR_CATEGORIES } from "../shared/constants.js";
 import { appendAuditEntry } from "../shared/storage.js";
+
+const BROWSER_TOOLS = getBrowserTools(TOOL_RUNTIMES.EXTENSION);
 
 export async function runAgentTask({ task, settings, initialTabId, controls }) {
   let currentTabId = initialTabId;

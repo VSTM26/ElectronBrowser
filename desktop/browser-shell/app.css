@@ -345,6 +345,7 @@ body {
 
 .nav-actions,
 .header-actions,
+.assistant-controls,
 .task-actions {
   display: flex;
   align-items: center;
@@ -506,15 +507,7 @@ select:focus {
 }
 
 .browser-context {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  color: var(--text-soft);
-  font-size: 13px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.75), rgba(245, 247, 251, 0.92));
+  display: none;
 }
 
 .context-copy {
@@ -660,6 +653,35 @@ select:focus {
   padding: 14px 56px 88px 14px;
 }
 
+.assistant-settings-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  padding: 14px 18px 18px 14px;
+  background: linear-gradient(180deg, rgba(245, 247, 251, 0.98) 0%, rgba(238, 243, 248, 0.98) 100%);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.assistant-settings-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.assistant-settings-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0 0;
+}
+
+.window-shell.settings-panel-open .agent-scroll-controls {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .agent-scroll-controls {
   position: absolute;
   right: 18px;
@@ -794,6 +816,10 @@ select:focus {
   gap: 12px;
 }
 
+.composer-card {
+  min-height: calc(100% - 2px);
+}
+
 .composer-help {
   color: var(--text-soft);
   font-size: 14px;
@@ -891,6 +917,23 @@ select:focus {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.iterations-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.iterations-control .text-input {
+  min-width: 0;
+}
+
+.control-guidance {
+  margin: 8px 0 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .feedback {
@@ -1190,5 +1233,9 @@ select:focus {
   .context-meta {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .assistant-settings-panel {
+    padding: 12px;
   }
 }

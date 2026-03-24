@@ -7,28 +7,34 @@ function installPageAgent() {
   const CURSOR_ID = "local-comet-cursor";
   const CURSOR_STYLE_ID = "local-comet-cursor-style";
   const CURSOR_TARGET_ID = "local-comet-target";
+  const elementIds = new WeakMap();
+  let nextElementId = 1;
 
   window.__localCometPageAgent = {
     async run(command) {
-      switch (command.type) {
-        case "snapshot":
-          return buildPageSnapshot(command.includeText !== false, command.includeMetadata === true);
-        case "clickElement":
-          return clickElement(command.elementId);
-        case "typeIntoElement":
-          return typeIntoElement(command);
-        case "scrollPage":
-          return scrollPage(command);
-        case "hoverElement":
-          return hoverElement(command.elementId);
-        case "moveMouseToElement":
-          return moveMouseToElement(command.elementId);
-        case "moveMouseToCoordinates":
-          return moveMouseToCoordinates(command);
-        case "readElementText":
-          return readElementText(command.elementId);
-        default:
-          return { ok: false, error: `Unknown page agent command: ${command.type}` };
+      try {
+        switch (command.type) {
+          case "snapshot":
+            return buildPageSnapshot(command.includeText !== false, command.includeMetadata === true);
+          case "clickElement":
+            return clickElement(command);
+          case "typeIntoElement":
+            return typeIntoElement(command);
+          case "scrollPage":
+            return scrollPage(command);
+          case "hoverElement":
+            return hoverElement(command);
+          case "moveMouseToElement":
+            return moveMouseToElement(command);
+          case "moveMouseToCoordinates":
+            return moveMouseToCoordinates(command);
+          case "readElementText":
+            return readElementText(command);
+          default:
+            return { ok: false, error: `Unknown page agent command: ${command.type}`, failureCategory: "invalid_command" };
+        }
+      } catch (error) {
+        return serializeCommandError(error);
       }
     }
   };
@@ -102,10 +108,12 @@ function installPageAgent() {
         role: element.getAttribute("role") || "",
         type: element.getAttribute("type") || "",
         name: element.getAttribute("name") || "",
+        label: truncate(composeFieldLabel(element), 100),
         text,
         placeholder: element.getAttribute("placeholder") || "",
         href: element instanceof HTMLAnchorElement ? element.href : "",
         disabled: isDisabled(element),
+        contentEditable: element instanceof HTMLElement && element.isContentEditable,
         domPath: buildDomPath(element),
         score,
         rect: {
@@ -238,17 +246,49 @@ function installPageAgent() {
     };
   }
 
-  async function clickElement(elementId) {
-    const element = getElementByAgentId(elementId);
+  async function clickElement({ elementId, elementHint }) {
+    const resolution = resolveElementTarget({ elementId, elementHint });
+    const element = resolution.element;
+    if (isDisabled(element)) {
+      return {
+        ok: false,
+        error: `${describeElement(element)} is disabled and cannot be clicked.`,
+        failureCategory: "blocked_target"
+      };
+    }
+    const beforeFocus = document.activeElement;
+    const beforeState = captureElementInteractionState(element);
     element.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
     await moveCursorToElement(element, "Click");
-    element.click();
+    dispatchClickSequence(element);
+    await nextFrame();
+    await delay(40);
     pulseCursor();
-    return { ok: true, summary: `Clicked ${describeElement(element)}.` };
+    const afterState = captureElementInteractionState(element);
+    const effectDetected = !afterState.connected ||
+      hasInteractionStateChanged(beforeState, afterState) ||
+      document.activeElement !== beforeFocus;
+    if (!effectDetected) {
+      return {
+        ok: false,
+        error: `Clicked ${describeElement(element)}${describeResolutionSuffix(resolution)}, but no visible effect was detected.`,
+        failureCategory: "no_state_change"
+      };
+    }
+    return {
+      ok: true,
+      effectVerified: true,
+      summary: `Clicked ${describeElement(element)}${describeResolutionSuffix(resolution)}.`
+    };
   }
 
-  async function typeIntoElement({ elementId, text, clearFirst, submit }) {
-    const element = getElementByAgentId(elementId);
+  async function typeIntoElement({ elementId, elementHint, text, clearFirst, submit }) {
+    const resolution = resolveElementTarget({
+      elementId,
+      elementHint,
+      editableOnly: true
+    });
+    const element = resolution.element;
     if (!(element instanceof HTMLInputElement) &&
       !(element instanceof HTMLTextAreaElement) &&
       !(element instanceof HTMLElement && element.isContentEditable)) {
@@ -259,57 +299,112 @@ function installPageAgent() {
     await moveCursorToElement(element, "Type");
     element.focus();
     const nextText = String(text || "");
+    const startingValue = readEditableValue(element);
+    const expectedValue = clearFirst === false ? `${startingValue}${nextText}` : nextText;
 
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-      if (clearFirst !== false) {
-        element.value = "";
-      }
-      element.value = clearFirst === false ? `${element.value}${nextText}` : nextText;
-      element.dispatchEvent(new Event("input", { bubbles: true }));
+      setNativeFormValue(element, expectedValue);
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data: nextText,
+        inputType: clearFirst === false ? "insertText" : "insertReplacementText"
+      }));
       element.dispatchEvent(new Event("change", { bubbles: true }));
     } else {
       if (clearFirst !== false) {
         element.textContent = "";
       }
-      element.textContent = clearFirst === false ? `${element.textContent || ""}${nextText}` : nextText;
+      element.textContent = expectedValue;
       element.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextText, inputType: "insertText" }));
     }
 
-    if (submit) {
-      element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      element.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    if (readEditableValue(element) !== expectedValue) {
+      return {
+        ok: false,
+        error: `Typed into ${describeElement(element)}${describeResolutionSuffix(resolution)}, but the field did not keep the expected value.`,
+        failureCategory: "input_rejected",
+        expectedValue: truncate(expectedValue, 160),
+        actualValue: truncate(readEditableValue(element), 160)
+      };
     }
 
-    return { ok: true, summary: `Typed into ${describeElement(element)}.` };
+    if (submit) {
+      dispatchEnterSequence(element);
+      const form = element instanceof HTMLElement ? element.closest("form") : null;
+      if (form instanceof HTMLFormElement && typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      }
+    }
+
+    return {
+      ok: true,
+      effectVerified: true,
+      summary: `Typed into ${describeElement(element)}${describeResolutionSuffix(resolution)}.`
+    };
   }
 
   async function scrollPage({ direction, amount }) {
     const multiplier = Math.min(2, Math.max(0.1, Number.parseFloat(amount) || 0.8));
     const delta = Math.round(window.innerHeight * multiplier) * (direction === "up" ? -1 : 1);
+    const beforeWindowScroll = Math.round(window.scrollY);
     await moveMouseToCoordinates({
       x: Math.round(window.innerWidth * 0.86),
       y: Math.round(window.innerHeight * (direction === "up" ? 0.3 : 0.72)),
       label: direction === "up" ? "Scroll up" : "Scroll down"
     });
     window.scrollBy({ top: delta, behavior: "auto" });
-    return { ok: true, summary: `Scrolled ${direction === "up" ? "up" : "down"} to ${Math.round(window.scrollY)}.` };
+    await nextFrame();
+    await delay(40);
+
+    const afterWindowScroll = Math.round(window.scrollY);
+    if (afterWindowScroll !== beforeWindowScroll) {
+      return {
+        ok: true,
+        effectVerified: true,
+        summary: `Scrolled ${direction === "up" ? "up" : "down"} to ${afterWindowScroll}.`
+      };
+    }
+
+    const scrollContainer = findBestScrollableContainer();
+    if (scrollContainer) {
+      const beforeContainerScroll = Math.round(scrollContainer.scrollTop);
+      scrollContainer.scrollBy({ top: delta, behavior: "auto" });
+      await nextFrame();
+      await delay(40);
+      const afterContainerScroll = Math.round(scrollContainer.scrollTop);
+      if (afterContainerScroll !== beforeContainerScroll) {
+        return {
+          ok: true,
+          effectVerified: true,
+          summary: `Scrolled the active panel ${direction === "up" ? "up" : "down"} to ${afterContainerScroll}.`
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      error: `Unable to scroll ${direction === "up" ? "up" : "down"} any farther in the current view.`,
+      failureCategory: "no_state_change"
+    };
   }
 
-  async function hoverElement(elementId) {
-    const element = getElementByAgentId(elementId);
+  async function hoverElement({ elementId, elementHint }) {
+    const resolution = resolveElementTarget({ elementId, elementHint });
+    const element = resolution.element;
     element.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
     await moveCursorToElement(element, "Hover");
     element.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
-    return { ok: true, summary: `Hovered over ${describeElement(element)}.` };
+    return { ok: true, summary: `Hovered over ${describeElement(element)}${describeResolutionSuffix(resolution)}.` };
   }
 
-  async function moveMouseToElement(elementId) {
-    const element = getElementByAgentId(elementId);
+  async function moveMouseToElement({ elementId, elementHint }) {
+    const resolution = resolveElementTarget({ elementId, elementHint });
+    const element = resolution.element;
     element.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
     await moveCursorToElement(element, "Move");
-    return { ok: true, summary: `Moved cursor to ${describeElement(element)}.` };
+    return { ok: true, summary: `Moved cursor to ${describeElement(element)}${describeResolutionSuffix(resolution)}.` };
   }
 
   async function moveMouseToCoordinates({ x, y, label }) {
@@ -319,13 +414,14 @@ function installPageAgent() {
     return { ok: true, position: { x: nextX, y: nextY }, summary: `Moved cursor to (${nextX}, ${nextY}).` };
   }
 
-  function readElementText(elementId) {
-    const element = getElementByAgentId(elementId);
+  function readElementText({ elementId, elementHint }) {
+    const resolution = resolveElementTarget({ elementId, elementHint });
+    const element = resolution.element;
     const fullText = element.innerText || element.textContent || "";
     return {
       ok: true,
       text: truncate(fullText.trim(), 8000),
-      summary: `Read ${fullText.trim().length} characters from ${describeElement(element)}.`
+      summary: `Read ${fullText.trim().length} characters from ${describeElement(element)}${describeResolutionSuffix(resolution)}.`
     };
   }
 
@@ -339,10 +435,56 @@ function installPageAgent() {
   }
 
   function ensureElementId(element) {
-    if (!element.hasAttribute(ELEMENT_ATTRIBUTE)) {
-      element.setAttribute(ELEMENT_ATTRIBUTE, `lc-${hashString(buildElementIdentity(element))}`);
+    const existingAttribute = element.getAttribute(ELEMENT_ATTRIBUTE);
+    if (existingAttribute) {
+      elementIds.set(element, existingAttribute);
+      return existingAttribute;
     }
-    return element.getAttribute(ELEMENT_ATTRIBUTE);
+
+    const existingId = elementIds.get(element);
+    if (existingId) {
+      element.setAttribute(ELEMENT_ATTRIBUTE, existingId);
+      return existingId;
+    }
+
+    const nextId = `lc-${nextElementId++}`;
+    elementIds.set(element, nextId);
+    element.setAttribute(ELEMENT_ATTRIBUTE, nextId);
+    return nextId;
+  }
+
+  function resolveElementTarget({ elementId, elementHint, editableOnly = false }) {
+    const exactId = String(elementId || "").trim();
+    const explicitHint = normalizeElementHint(elementHint);
+    if (exactId) {
+      try {
+        const exactElement = getElementByAgentId(exactId);
+        if (!editableOnly || isEditableElement(exactElement)) {
+          return {
+            element: exactElement,
+            matchedBy: "id",
+            requested: exactId
+          };
+        }
+      } catch {
+        if (isAgentElementId(exactId) && !explicitHint) {
+          throw createPageAgentError(`Element ${exactId} was not found. Inspect the page again.`, {
+            failureCategory: "missing_element",
+            requestedTarget: exactId
+          });
+        }
+      }
+    }
+
+    const hint = explicitHint || (!isAgentElementId(exactId) ? normalizeElementHint(exactId) : "");
+    if (hint) {
+      return resolveElementTargetByHint(hint, { editableOnly });
+    }
+
+    throw createPageAgentError(`Element ${exactId || elementHint || "target"} was not found. Inspect the page again.`, {
+      failureCategory: "missing_element",
+      requestedTarget: exactId || elementHint || "target"
+    });
   }
 
   function isVisible(element) {
@@ -360,8 +502,13 @@ function installPageAgent() {
 
   function composeElementText(element) {
     return [
+      composeFieldLabel(element),
       element.getAttribute("aria-label"),
+      element.getAttribute("name"),
       element.getAttribute("placeholder"),
+      element instanceof HTMLInputElement && /checkbox|radio/i.test(element.type || "")
+        ? (element.checked ? "checked" : "unchecked")
+        : "",
       element instanceof HTMLInputElement ? element.value : "",
       element.textContent
     ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
@@ -391,6 +538,267 @@ function installPageAgent() {
       control.getAttribute("name"),
       control.getAttribute("placeholder")
     ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  function resolveElementTargetByHint(hint, { editableOnly = false } = {}) {
+    const candidates = findElementCandidatesByHint(hint, { editableOnly });
+    if (!candidates.length) {
+      throw createPageAgentError(`Element ${hint} was not found. Inspect the page again.`, {
+        failureCategory: "missing_element",
+        requestedTarget: hint
+      });
+    }
+
+    const [best, second] = candidates;
+    if (best.score < 6) {
+      throw createPageAgentError(`I could not confidently match "${hint}" to a page element. Inspect the page again and retry with an exact element id.`, {
+        failureCategory: "missing_element",
+        requestedTarget: hint,
+        candidates: candidates.map((candidate) => summarizeCandidate(candidate.entry, candidate.score))
+      });
+    }
+
+    if (second && second.score >= best.score - 1) {
+      throw createPageAgentError(`"${hint}" matches multiple similar elements. Inspect the page again and retry with an exact element id or a more specific hint.`, {
+        failureCategory: "ambiguous_element",
+        requestedTarget: hint,
+        candidates: candidates.map((candidate) => summarizeCandidate(candidate.entry, candidate.score))
+      });
+    }
+
+    return {
+      element: getElementByAgentId(best.entry.id),
+      matchedBy: "hint",
+      requested: hint,
+      matchedHint: best.hint
+    };
+  }
+
+  function findElementCandidatesByHint(hint, { editableOnly = false } = {}) {
+    const interactiveElements = collectInteractiveElements()
+      .filter((entry) => !editableOnly || isEditableSnapshotEntry(entry));
+    const normalizedHint = normalizeElementHint(hint);
+    const hintTokens = normalizedHint.split(/\s+/).filter(Boolean);
+
+    return interactiveElements
+      .map((entry) => {
+      const haystack = normalizeElementHint([
+        entry.id,
+        entry.label,
+        entry.text,
+        entry.name,
+        entry.placeholder,
+        entry.tag,
+        entry.type,
+        entry.role,
+        entry.contentEditable ? "contenteditable" : ""
+      ].filter(Boolean).join(" "));
+      const score = scoreHintAgainstElement(normalizedHint, hintTokens, haystack, entry);
+      return {
+        entry,
+        score,
+        hint: normalizedHint
+      };
+    })
+      .filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score || left.entry.rank - right.entry.rank)
+      .slice(0, 5);
+  }
+
+  function scoreHintAgainstElement(normalizedHint, hintTokens, haystack, entry) {
+    let score = 0;
+    if (!normalizedHint || !haystack) {
+      return score;
+    }
+
+    if (haystack.includes(normalizedHint)) {
+      score += 8;
+    }
+
+    const overlap = hintTokens.filter((token) => haystack.includes(token)).length;
+    score += overlap * 2;
+
+    if (entry.label && normalizeElementHint(entry.label).includes(normalizedHint)) {
+      score += 4;
+    }
+    if (entry.placeholder && normalizeElementHint(entry.placeholder).includes(normalizedHint)) {
+      score += 4;
+    }
+    if (entry.name && normalizeElementHint(entry.name).includes(normalizedHint)) {
+      score += 3;
+    }
+    if (entry.type && normalizedHint.includes(String(entry.type).toLowerCase())) {
+      score += 1;
+    }
+    if (entry.tag === "input" && /\b(field|input|email|password|name|search)\b/.test(normalizedHint)) {
+      score += 2;
+    }
+    if ((entry.tag === "button" || entry.role === "button") && /\b(button|submit|continue|next|save)\b/.test(normalizedHint)) {
+      score += 2;
+    }
+
+    return score;
+  }
+
+  function normalizeElementHint(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/id\s*\(.*?\)/g, " ")
+      .replace(/get from inspect_page/gi, " ")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function isEditableSnapshotEntry(entry) {
+    return entry.tag === "input" ||
+      entry.tag === "textarea" ||
+      entry.role === "textbox" ||
+      entry.contentEditable === true;
+  }
+
+  function isEditableElement(element) {
+    return element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement ||
+      (element instanceof HTMLElement && element.isContentEditable);
+  }
+
+  function setNativeFormValue(element, value) {
+    const prototype = element instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+    if (descriptor?.set) {
+      descriptor.set.call(element, value);
+    } else {
+      element.value = value;
+    }
+    if (typeof element.setSelectionRange === "function") {
+      const cursor = String(value || "").length;
+      element.setSelectionRange(cursor, cursor);
+    }
+  }
+
+  function describeResolutionSuffix(resolution) {
+    return resolution?.matchedBy === "hint"
+      ? ` (matched "${truncate(resolution.matchedHint || resolution.requested || "", 60)}")`
+      : "";
+  }
+
+  function createPageAgentError(message, details = {}) {
+    const error = new Error(message);
+    Object.assign(error, details);
+    return error;
+  }
+
+  function serializeCommandError(error) {
+    const result = {
+      ok: false,
+      error: truncate(String(error?.message || error || "Page agent command failed."), 280),
+      failureCategory: error?.failureCategory || "page_agent"
+    };
+
+    if (error?.requestedTarget) {
+      result.requestedTarget = String(error.requestedTarget);
+    }
+    if (Array.isArray(error?.candidates) && error.candidates.length) {
+      result.candidates = error.candidates.slice(0, 5);
+    }
+
+    return result;
+  }
+
+  function summarizeCandidate(entry, score) {
+    return {
+      id: entry.id,
+      tag: entry.tag,
+      type: entry.type || "",
+      label: truncate(entry.label || entry.text || entry.name || entry.placeholder || entry.tag, 100),
+      text: truncate(entry.text || "", 120),
+      score: Number(score.toFixed(2))
+    };
+  }
+
+  function isAgentElementId(value) {
+    return /^lc-[a-z0-9-]+$/i.test(String(value || "").trim());
+  }
+
+  function readEditableValue(element) {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+      return String(element.value || "");
+    }
+    return String(element.textContent || "");
+  }
+
+  function captureElementInteractionState(element) {
+    return {
+      connected: element.isConnected,
+      url: window.location.href,
+      activeTag: document.activeElement?.tagName || "",
+      activeId: document.activeElement instanceof HTMLElement ? document.activeElement.getAttribute(ELEMENT_ATTRIBUTE) || "" : "",
+      ariaExpanded: element.getAttribute("aria-expanded") || "",
+      ariaPressed: element.getAttribute("aria-pressed") || "",
+      checked: element instanceof HTMLInputElement ? element.checked : null,
+      value: truncate(readEditableValue(element), 160)
+    };
+  }
+
+  function hasInteractionStateChanged(beforeState, afterState) {
+    return JSON.stringify(beforeState) !== JSON.stringify(afterState);
+  }
+
+  function dispatchClickSequence(element) {
+    const rect = element.getBoundingClientRect();
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: Math.round(rect.left + rect.width / 2),
+      clientY: Math.round(rect.top + rect.height / 2),
+      button: 0
+    };
+
+    element.focus?.();
+    element.dispatchEvent(new MouseEvent("mouseover", eventInit));
+    element.dispatchEvent(new MouseEvent("mousemove", eventInit));
+    element.dispatchEvent(new MouseEvent("mousedown", eventInit));
+    element.dispatchEvent(new MouseEvent("mouseup", eventInit));
+    element.click();
+  }
+
+  function dispatchEnterSequence(element) {
+    const eventInit = { key: "Enter", code: "Enter", bubbles: true, cancelable: true };
+    element.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+    element.dispatchEvent(new KeyboardEvent("keypress", eventInit));
+    element.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+  }
+
+  function findBestScrollableContainer() {
+    const candidates = Array.from(document.querySelectorAll("*"))
+      .filter((element) => element instanceof HTMLElement)
+      .filter((element) => element !== document.body && element !== document.documentElement)
+      .filter((element) => {
+        const style = window.getComputedStyle(element);
+        return /(auto|scroll|overlay)/.test(style.overflowY) &&
+          element.scrollHeight > element.clientHeight + 24 &&
+          element.clientHeight > 120 &&
+          isVisible(element);
+      })
+      .slice(0, 80);
+
+    let best = null;
+    for (const element of candidates) {
+      const rect = element.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      const centerDistance = Math.abs((rect.top + rect.height / 2) - window.innerHeight / 2);
+      const score = area - centerDistance * 120;
+      if (!best || score > best.score) {
+        best = { element, score };
+      }
+    }
+
+    return best?.element || null;
   }
 
   function computeElementScore(element, rect, text, domOrder) {

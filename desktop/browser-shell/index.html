@@ -39,9 +39,14 @@
             </div>
           </div>
 
-          <button id="toggle-agent-button" class="secondary-button" type="button" aria-pressed="true">
-            Hide assistant
-          </button>
+          <div class="assistant-controls">
+            <button id="assistant-settings-button" class="icon-button" type="button" title="Assistant settings" aria-label="Assistant settings" aria-expanded="false">
+              &#9881;
+            </button>
+            <button id="toggle-agent-button" class="secondary-button" type="button" aria-pressed="true">
+              Hide assistant
+            </button>
+          </div>
         </div>
 
         <div class="tab-strip">
@@ -92,22 +97,6 @@
 
         <aside id="agent-pane" class="agent-pane">
           <div class="agent-scroll">
-            <section class="agent-card hero-card">
-              <div class="hero-copy">
-                <p class="eyebrow">Electron Browser</p>
-                <h1>Local-first browsing with an Ollama-powered assistant.</h1>
-                <p>Use the browser normally, then hand off tasks to the assistant when you want help driving the page.</p>
-              </div>
-            </section>
-
-            <section class="agent-card status-card">
-              <div class="status-row">
-                <span id="status-pill" class="status-pill idle">Idle</span>
-                <span id="step-indicator" class="step-indicator">Ready</span>
-              </div>
-              <p id="status-copy" class="status-copy">Waiting for a task.</p>
-            </section>
-
             <form id="task-form" class="agent-card composer-card">
               <div class="card-header">
                 <div>
@@ -131,87 +120,119 @@
                 <button id="stop-task-button" class="secondary-button" type="button" disabled>Stop</button>
               </div>
             </form>
+          </div>
 
-            <section class="agent-card settings-card">
-              <div class="card-header">
+          <div id="assistant-settings-panel" class="assistant-settings-panel" aria-hidden="true" hidden>
+            <div class="assistant-settings-sheet">
+              <div class="assistant-settings-header">
                 <div>
-                  <p class="eyebrow">Ollama</p>
-                  <h2>Connection</h2>
+                  <p class="eyebrow">Assistant</p>
+                  <h2>Settings</h2>
                 </div>
-                <div class="header-actions">
-                  <button id="refresh-models-button" class="secondary-button compact" type="button">Refresh</button>
-                  <button id="test-connection-button" class="secondary-button compact" type="button">Test</button>
-                </div>
+                <button id="close-settings-button" class="secondary-button compact" type="button">Done</button>
               </div>
 
-              <label class="field-label" for="base-url-input">Base URL</label>
-              <input id="base-url-input" class="text-input" type="text" value="http://127.0.0.1:11434">
+              <section class="agent-card hero-card">
+                <div class="hero-copy">
+                  <p class="eyebrow">Electron Browser</p>
+                  <h1>Local-first browsing with an Ollama-powered assistant.</h1>
+                  <p>Use the browser normally, then hand off tasks to the assistant when you want help driving the page.</p>
+                </div>
+              </section>
 
-              <label class="field-label" for="api-key-input">API key</label>
-              <input id="api-key-input" class="text-input" type="password" placeholder="Optional">
+              <section class="agent-card status-card">
+                <div class="status-row">
+                  <span id="status-pill" class="status-pill idle">Idle</span>
+                  <span id="step-indicator" class="step-indicator">Ready</span>
+                </div>
+                <p id="status-copy" class="status-copy">Waiting for a task.</p>
+              </section>
 
-              <label class="field-label" for="model-select">Model</label>
-              <select id="model-select" class="text-input"></select>
-              <p id="model-guidance" class="model-guidance">Vision-capable models are preferred for screenshot grounding.</p>
+              <section class="agent-card settings-card">
+                <div class="card-header">
+                  <div>
+                    <p class="eyebrow">Ollama</p>
+                    <h2>Connection</h2>
+                  </div>
+                  <div class="header-actions">
+                    <button id="refresh-models-button" class="secondary-button compact" type="button">Refresh</button>
+                    <button id="test-connection-button" class="secondary-button compact" type="button">Test</button>
+                  </div>
+                </div>
 
-              <div class="settings-grid">
-                <div>
-                  <label class="field-label" for="temperature-input">Temperature</label>
-                  <input id="temperature-input" class="text-input" type="number" min="0" max="2" step="0.1" value="0.2">
-                </div>
-                <div>
-                  <label class="field-label" for="iterations-input">Max steps</label>
-                  <input id="iterations-input" class="text-input" type="number" min="2" max="30" step="1" value="10">
-                </div>
-              </div>
+                <label class="field-label" for="base-url-input">Base URL</label>
+                <input id="base-url-input" class="text-input" type="text" value="http://127.0.0.1:11434">
 
-              <label class="field-label" for="trusted-origins-input">Trusted origins</label>
-              <textarea id="trusted-origins-input" rows="4" placeholder="github.com&#10;mail.google.com"></textarea>
-              <p id="policy-guidance" class="policy-guidance">Mutating actions on untrusted or sensitive pages may require approval.</p>
+                <label class="field-label" for="api-key-input">API key</label>
+                <input id="api-key-input" class="text-input" type="password" placeholder="Optional">
 
-              <button id="save-settings-button" class="primary-button wide" type="button">Save settings</button>
-              <p id="settings-feedback" class="feedback">Settings are stored locally in this browser.</p>
-            </section>
+                <label class="field-label" for="model-select">Model</label>
+                <select id="model-select" class="text-input"></select>
+                <p id="model-guidance" class="model-guidance">Vision-capable models are preferred for screenshot grounding.</p>
 
-            <section class="agent-card telemetry-card">
-              <div class="card-header">
-                <div>
-                  <p class="eyebrow">Evaluation</p>
-                  <h2>Telemetry</h2>
+                <div class="settings-grid">
+                  <div>
+                    <label class="field-label" for="temperature-input">Temperature</label>
+                    <input id="temperature-input" class="text-input" type="number" min="0" max="2" step="0.1" value="0.2">
+                  </div>
+                  <div>
+                    <label class="field-label" for="iterations-input">Max steps</label>
+                    <div class="iterations-control">
+                      <button id="iterations-auto-button" class="secondary-button compact" type="button" aria-pressed="true">Auto</button>
+                      <input id="iterations-input" class="text-input" type="number" min="2" max="30" step="1" value="10">
+                    </div>
+                    <p id="iterations-guidance" class="control-guidance">The assistant will choose a step budget for each task.</p>
+                  </div>
                 </div>
-              </div>
-              <div class="telemetry-grid">
-                <div class="telemetry-stat">
-                  <span class="telemetry-label">Task success</span>
-                  <strong id="telemetry-task-success">0%</strong>
-                </div>
-                <div class="telemetry-stat">
-                  <span class="telemetry-label">Step success</span>
-                  <strong id="telemetry-step-success">0%</strong>
-                </div>
-                <div class="telemetry-stat">
-                  <span class="telemetry-label">Approval rate</span>
-                  <strong id="telemetry-approval-rate">0%</strong>
-                </div>
-                <div class="telemetry-stat">
-                  <span class="telemetry-label">Recovery rate</span>
-                  <strong id="telemetry-recovery-rate">0%</strong>
-                </div>
-              </div>
-              <p id="telemetry-workflow-summary" class="telemetry-note">Workflow library is still gathering examples.</p>
-              <p id="telemetry-last-failure" class="telemetry-note">No recorded failures yet.</p>
-            </section>
 
-            <section class="agent-card activity-card">
-              <div class="card-header">
-                <div>
-                  <p class="eyebrow">Activity</p>
-                  <h2>Decision trace</h2>
+                <label class="field-label" for="trusted-origins-input">Trusted origins</label>
+                <textarea id="trusted-origins-input" rows="4" placeholder="github.com&#10;mail.google.com"></textarea>
+                <p id="policy-guidance" class="policy-guidance">Mutating actions on untrusted or sensitive pages may require approval.</p>
+
+                <button id="save-settings-button" class="primary-button wide" type="button">Save settings</button>
+                <p id="settings-feedback" class="feedback">Settings are stored locally in this browser.</p>
+              </section>
+
+              <section class="agent-card telemetry-card">
+                <div class="card-header">
+                  <div>
+                    <p class="eyebrow">Evaluation</p>
+                    <h2>Telemetry</h2>
+                  </div>
                 </div>
-                <button id="clear-logs-button" class="secondary-button compact" type="button">Clear</button>
-              </div>
-              <ul id="logs" class="logs"></ul>
-            </section>
+                <div class="telemetry-grid">
+                  <div class="telemetry-stat">
+                    <span class="telemetry-label">Task success</span>
+                    <strong id="telemetry-task-success">0%</strong>
+                  </div>
+                  <div class="telemetry-stat">
+                    <span class="telemetry-label">Step success</span>
+                    <strong id="telemetry-step-success">0%</strong>
+                  </div>
+                  <div class="telemetry-stat">
+                    <span class="telemetry-label">Approval rate</span>
+                    <strong id="telemetry-approval-rate">0%</strong>
+                  </div>
+                  <div class="telemetry-stat">
+                    <span class="telemetry-label">Recovery rate</span>
+                    <strong id="telemetry-recovery-rate">0%</strong>
+                  </div>
+                </div>
+                <p id="telemetry-workflow-summary" class="telemetry-note">Workflow library is still gathering examples.</p>
+                <p id="telemetry-last-failure" class="telemetry-note">No recorded failures yet.</p>
+              </section>
+
+              <section class="agent-card activity-card">
+                <div class="card-header">
+                  <div>
+                    <p class="eyebrow">Activity</p>
+                    <h2>Decision trace</h2>
+                  </div>
+                  <button id="clear-logs-button" class="secondary-button compact" type="button">Clear</button>
+                </div>
+                <ul id="logs" class="logs"></ul>
+              </section>
+            </div>
           </div>
 
           <div class="agent-scroll-controls" aria-label="Assistant rail scroll controls">

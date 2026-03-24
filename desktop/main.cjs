@@ -109,7 +109,18 @@ function registerIpcHandlers() {
     const { settings, messages, tools } = payload || {};
     return chat(settings || {}, messages || [], tools || []);
   });
-  ipcMain.handle("perception:ocr-screenshot", async (_event, payload) => recognizeScreenshot(payload || {}));
+  ipcMain.handle("perception:ocr-screenshot", async (_event, payload) => {
+    try {
+      return await recognizeScreenshot(payload || {});
+    } catch (error) {
+      const message = String(error?.message || error || "OCR failed in the main process.");
+      console.error(`[perception] Unhandled OCR failure: ${message}`);
+      return {
+        ok: false,
+        error: message
+      };
+    }
+  });
 }
 
 function applyAppIcon() {
@@ -205,6 +216,7 @@ async function runSmokeCheck() {
         filler.style.flex = "0 0 auto";
         filler.dataset.smokeSpacer = "true";
         scrollContent.appendChild(filler);
+        window.dispatchEvent(new Event("resize"));
 
         pane.scrollTop = 0;
         await new Promise((resolve) => requestAnimationFrame(() => resolve()));

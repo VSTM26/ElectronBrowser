@@ -12,7 +12,8 @@ async function listModels(settings) {
   }, 15000);
 
   if (!response.ok) {
-    throw new Error(`Failed to list models (${response.status}): ${await safeReadBody(response)}`);
+    const body = await safeReadBody(response);
+    throw new Error(buildOllamaHttpErrorMessage("list models", response.status, body, settings));
   }
 
   const payload = await response.json();
@@ -44,7 +45,8 @@ async function chat(settings, messages, tools) {
   }, settings.requestTimeoutMs || DEFAULT_TIMEOUT_MS);
 
   if (!response.ok) {
-    throw new Error(`Ollama chat failed (${response.status}): ${await safeReadBody(response)}`);
+    const body = await safeReadBody(response);
+    throw new Error(buildOllamaHttpErrorMessage("chat", response.status, body, settings));
   }
 
   return response.json();
@@ -90,13 +92,73 @@ function buildHeaders(settings) {
   return headers;
 }
 
+function buildOllamaHttpErrorMessage(action, status, body, settings) {
+  const serverMessage = extractServerMessage(body);
+  const localHint = isLikelyLocalBaseUrl(settings?.baseUrl);
+
+  if (status === 401) {
+    return localHint
+      ? `Ollama ${action} failed: authentication was rejected. Local Ollama usually does not need an API key, so clear the API key field and make sure the Base URL is http://127.0.0.1:11434.`
+      : `Ollama ${action} failed: the configured server rejected your credentials. Check the Base URL and API key for that endpoint.`;
+  }
+
+  if (status === 403 && /premium model access|subscription/i.test(serverMessage)) {
+    return localHint
+      ? `Ollama ${action} failed: this request was treated as premium-gated. If you meant to use local Ollama, make sure the Base URL is http://127.0.0.1:11434, clear the API key, and run ollama serve locally. Server said: ${truncateText(serverMessage, 220)}`
+      : `Ollama ${action} failed: the configured server requires a paid subscription or premium access. For local ElectronBrowser use, switch the Base URL to http://127.0.0.1:11434 and clear the API key unless you intentionally want a hosted endpoint. Server said: ${truncateText(serverMessage, 220)}`;
+  }
+
+  if (status === 403) {
+    return localHint
+      ? `Ollama ${action} failed: access was forbidden by the configured endpoint. Double-check that the app is pointed at your local Ollama server on http://127.0.0.1:11434.`
+      : `Ollama ${action} failed: the configured server denied access. Check whether this Base URL points to a hosted Ollama account, team gateway, or another restricted endpoint.`;
+  }
+
+  return `Ollama ${action} failed (${status}): ${serverMessage}`;
+}
+
+function extractServerMessage(body) {
+  const text = String(body || "").trim();
+  if (!text) {
+    return "No server details were returned.";
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+  } catch {
+    // Fall back to the raw response text.
+  }
+
+  return truncateText(text, 320);
+}
+
+function isLikelyLocalBaseUrl(baseUrl) {
+  try {
+    const parsed = new URL(String(baseUrl || "http://127.0.0.1:11434"));
+    return ["127.0.0.1", "localhost", "0.0.0.0", "::1"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 async function safeReadBody(response) {
   try {
     const text = await response.text();
-    return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+    return truncateText(text, 500);
   } catch {
     return "Unable to read response body.";
   }
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text;
 }
 
 module.exports = {

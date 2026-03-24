@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   temperature: 0.2,
   keepAlive: "10m",
   maxIterations: 10,
+  maxIterationsAuto: true,
   requestTimeoutMs: 120000,
   approvalMode: "auto",
   trustedOrigins: ""
@@ -42,6 +43,21 @@ const TOOLS_WITH_PAGE_STATE_DIFF = new Set([
   "type_into_element",
   "hover_element",
   "scroll_page"
+]);
+
+const TOOL_BASELINE_REQUIRED = new Set([
+  "click_element",
+  "type_into_element",
+  "hover_element",
+  "scroll_page",
+  "open_or_search",
+  "navigate_to",
+  "reload_tab",
+  "go_back",
+  "go_forward",
+  "switch_to_tab",
+  "open_new_tab",
+  "close_current_tab"
 ]);
 
 const VISION_MODEL_PATTERNS = [
@@ -88,19 +104,23 @@ const TOOL_DEFINITIONS = [
     includeDiff: { type: "boolean", description: "Include the diff from the last observed page state for this tab.", default: true }
   }),
   defineTool("click_element", "Click an interactive element on the current page by element id.", {
-    elementId: { type: "string", description: "Stable element id from inspect_page." }
+    elementId: { type: "string", description: "Stable element id from inspect_page. If you do not have the exact id, pass your best target phrase here and optionally use elementHint too." },
+    elementHint: { type: "string", description: "Optional short fallback hint like 'email field' or 'Continue button'." }
   }, ["elementId"]),
   defineTool("type_into_element", "Type text into an input, textarea, or contenteditable element.", {
-    elementId: { type: "string", description: "Stable element id from inspect_page." },
+    elementId: { type: "string", description: "Stable element id from inspect_page. If you do not have the exact id, pass your best target phrase here and optionally use elementHint too." },
+    elementHint: { type: "string", description: "Optional short fallback hint like 'email field' or 'search box'." },
     text: { type: "string", description: "Text to enter." },
     clearFirst: { type: "boolean", description: "Clear existing text first.", default: true },
     submit: { type: "boolean", description: "Press Enter after typing.", default: false }
   }, ["elementId", "text"]),
   defineTool("hover_element", "Hover over an element to reveal menus or tooltips.", {
-    elementId: { type: "string", description: "Stable element id from inspect_page." }
+    elementId: { type: "string", description: "Stable element id from inspect_page. If you do not have the exact id, pass your best target phrase here and optionally use elementHint too." },
+    elementHint: { type: "string", description: "Optional short fallback hint for the target element." }
   }, ["elementId"]),
   defineTool("move_mouse_to_element", "Move the visible cursor to a specific element before acting.", {
-    elementId: { type: "string", description: "Stable element id from inspect_page." }
+    elementId: { type: "string", description: "Stable element id from inspect_page. If you do not have the exact id, pass your best target phrase here and optionally use elementHint too." },
+    elementHint: { type: "string", description: "Optional short fallback hint for the target element." }
   }, ["elementId"]),
   defineTool("move_mouse_to_coordinates", "Move the visible cursor to viewport coordinates.", {
     x: { type: "integer", description: "Viewport x coordinate." },
@@ -112,12 +132,15 @@ const TOOL_DEFINITIONS = [
     amount: { type: "number", description: "Viewport multiple between 0.1 and 2.0.", default: 0.8 }
   }),
   defineTool("read_element_text", "Read the full text of a specific element.", {
-    elementId: { type: "string", description: "Stable element id from inspect_page." }
+    elementId: { type: "string", description: "Stable element id from inspect_page. If you do not have the exact id, pass your best target phrase here and optionally use elementHint too." },
+    elementHint: { type: "string", description: "Optional short fallback hint for the target element." }
   }, ["elementId"]),
   defineTool("wait", "Wait for a number of milliseconds so the page can update.", {
     milliseconds: { type: "integer", description: "Delay between 100 and 10000 milliseconds.", default: 1000 }
   })
 ];
+
+const TOOL_DEFINITION_MAP = new Map(TOOL_DEFINITIONS.map((entry) => [entry.function.name, entry]));
 
 const SYSTEM_PROMPT = [
   "You are an autonomous browser operator inside a local desktop browser shell.",
@@ -143,6 +166,7 @@ const EXECUTOR_SYSTEM_PROMPT = [
   "You are the executor for a browser automation system.",
   "You may use browser tools, but only to complete the current step.",
   "Do not invent ids or page facts. Inspect when you need evidence.",
+  "For element tools, prefer the exact element id from inspect_page. If the page likely changed, include a short elementHint such as 'email field' or 'Continue button'.",
   "Keep actions small and verifiable.",
   "When the current step is complete, reply with a concise completion summary instead of more tool calls."
 ].join(" ");
@@ -157,7 +181,9 @@ const VERIFIER_SYSTEM_PROMPT = [
 const FINALIZER_SYSTEM_PROMPT = [
   "You are the final response generator for a browser automation system.",
   "Summarize the completed work clearly for the user.",
-  "Mention blockers or caveats if the task was not fully completed."
+  "Mention blockers or caveats if the task was not fully completed.",
+  "Write naturally in plain prose.",
+  "Do not use headings like 'Task Summary', 'Blockers', or 'Recommendation' unless the user explicitly asked for a structured report."
 ].join(" ");
 
 const MAX_PLAN_STEPS = 6;
@@ -262,8 +288,11 @@ const FAILURE_CATEGORIES = {
   captcha: "CAPTCHA or human verification wall",
   auth_wall: "Authentication wall",
   missing_element: "Missing or moved element",
+  ambiguous_element: "Ambiguous element match",
   navigation: "Navigation or load failure",
   no_state_change: "Expected state change did not happen",
+  input_rejected: "Input was rejected by the page",
+  invalid_arguments: "Tool arguments were invalid",
   wrong_domain: "Unexpected domain or tab context",
   policy_blocked: "Safety policy blocked the action",
   approval_denied: "User denied approval",
@@ -292,6 +321,7 @@ const elements = {
   appVersion: document.getElementById("app-version"),
   tabs: document.getElementById("tabs"),
   newTabButton: document.getElementById("new-tab-button"),
+  assistantSettingsButton: document.getElementById("assistant-settings-button"),
   toggleAgentButton: document.getElementById("toggle-agent-button"),
   introOverlay: document.getElementById("intro-overlay"),
   addressForm: document.getElementById("address-form"),
@@ -307,6 +337,8 @@ const elements = {
   pageProgress: document.getElementById("page-progress"),
   pageBadge: document.getElementById("page-badge"),
   agentPane: document.getElementById("agent-pane"),
+  assistantSettingsPanel: document.getElementById("assistant-settings-panel"),
+  closeSettingsButton: document.getElementById("close-settings-button"),
   agentScrollUpButton: document.getElementById("agent-scroll-up-button"),
   agentScrollDownButton: document.getElementById("agent-scroll-down-button"),
   statusPill: document.getElementById("status-pill"),
@@ -323,7 +355,9 @@ const elements = {
   modelSelect: document.getElementById("model-select"),
   modelGuidance: document.getElementById("model-guidance"),
   temperatureInput: document.getElementById("temperature-input"),
+  iterationsAutoButton: document.getElementById("iterations-auto-button"),
   iterationsInput: document.getElementById("iterations-input"),
+  iterationsGuidance: document.getElementById("iterations-guidance"),
   trustedOriginsInput: document.getElementById("trusted-origins-input"),
   policyGuidance: document.getElementById("policy-guidance"),
   saveSettingsButton: document.getElementById("save-settings-button"),
@@ -406,10 +440,19 @@ async function boot() {
 
 function bindEvents() {
   elements.newTabButton.addEventListener("click", () => createTab(START_PAGE_URL));
+  elements.assistantSettingsButton.addEventListener("click", () => {
+    toggleSettingsPanel();
+  });
   elements.toggleAgentButton.addEventListener("click", () => {
     state.preferences.agentPaneOpen = !state.preferences.agentPaneOpen;
+    if (!state.preferences.agentPaneOpen) {
+      state.preferences.settingsPanelOpen = false;
+    }
     persistPreferences();
     applyLayoutState();
+  });
+  elements.closeSettingsButton.addEventListener("click", () => {
+    toggleSettingsPanel(false);
   });
   elements.agentScrollUpButton.addEventListener("click", () => {
     scrollAgentPane(-1);
@@ -476,11 +519,21 @@ function bindEvents() {
   elements.modelSelect.addEventListener("change", () => {
     updateModelGuidance(state.modelCatalog, elements.modelSelect.value);
   });
+  elements.iterationsAutoButton.addEventListener("click", () => {
+    state.settings.maxIterationsAuto = state.settings.maxIterationsAuto === false;
+    updateIterationsModeUi();
+  });
   elements.trustedOriginsInput.addEventListener("input", () => {
     updatePolicyGuidance(elements.trustedOriginsInput.value);
   });
 
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.preferences.settingsPanelOpen) {
+      event.preventDefault();
+      toggleSettingsPanel(false);
+      return;
+    }
+
     const modifierPressed = event.metaKey || event.ctrlKey;
     if (!modifierPressed) {
       return;
@@ -678,6 +731,7 @@ function hydrateSettingsForm() {
   elements.apiKeyInput.value = state.settings.apiKey;
   elements.temperatureInput.value = String(state.settings.temperature);
   elements.iterationsInput.value = String(state.settings.maxIterations);
+  updateIterationsModeUi();
   elements.trustedOriginsInput.value = state.settings.trustedOrigins || "";
   state.modelCatalog = normalizeModelCatalog([{ name: state.settings.model }], state.settings.model);
   populateModelOptions(state.modelCatalog, state.settings.model);
@@ -691,6 +745,7 @@ function readSettingsForm() {
     apiKey: elements.apiKeyInput.value.trim(),
     model: elements.modelSelect.value || state.settings.model || DEFAULT_SETTINGS.model,
     temperature: clampNumber(elements.temperatureInput.value, 0, 2, DEFAULT_SETTINGS.temperature),
+    maxIterationsAuto: state.settings.maxIterationsAuto !== false,
     maxIterations: clampInteger(elements.iterationsInput.value, 2, 30, DEFAULT_SETTINGS.maxIterations),
     trustedOrigins: normalizeTrustedOriginsInput(elements.trustedOriginsInput.value),
     requestTimeoutMs: DEFAULT_SETTINGS.requestTimeoutMs,
@@ -716,11 +771,13 @@ function loadPreferences() {
     const raw = localStorage.getItem("desktopPreferences");
     const parsed = raw ? JSON.parse(raw) : {};
     return {
-      agentPaneOpen: parsed.agentPaneOpen !== false
+      agentPaneOpen: parsed.agentPaneOpen !== false,
+      settingsPanelOpen: false
     };
   } catch {
     return {
-      agentPaneOpen: true
+      agentPaneOpen: true,
+      settingsPanelOpen: false
     };
   }
 }
@@ -945,6 +1002,7 @@ function syncMemoryPreferencesFromSettings() {
     approvalMode: state.settings.approvalMode || DEFAULT_SETTINGS.approvalMode,
     temperature: state.settings.temperature,
     maxIterations: state.settings.maxIterations,
+    maxIterationsAuto: state.settings.maxIterationsAuto !== false,
     trustedOrigins: parseTrustedOrigins(state.settings.trustedOrigins),
     updatedAt: new Date().toISOString()
   };
@@ -995,9 +1053,55 @@ function recordRecentDomainVisit(url, title) {
 
 function applyLayoutState() {
   elements.windowShell.classList.toggle("agent-collapsed", state.preferences.agentPaneOpen === false);
+  elements.windowShell.classList.toggle("settings-panel-open", state.preferences.settingsPanelOpen === true);
   elements.toggleAgentButton.textContent = state.preferences.agentPaneOpen ? "Hide assistant" : "Show assistant";
   elements.toggleAgentButton.setAttribute("aria-pressed", state.preferences.agentPaneOpen ? "true" : "false");
+  elements.assistantSettingsButton.setAttribute("aria-expanded", state.preferences.settingsPanelOpen ? "true" : "false");
+  elements.assistantSettingsPanel.hidden = state.preferences.settingsPanelOpen !== true;
+  elements.assistantSettingsPanel.setAttribute("aria-hidden", state.preferences.settingsPanelOpen ? "false" : "true");
   window.requestAnimationFrame(updateAgentScrollButtons);
+}
+
+function updateIterationsModeUi() {
+  const auto = state.settings.maxIterationsAuto !== false;
+  elements.iterationsAutoButton.textContent = auto ? "Auto on" : "Auto off";
+  elements.iterationsAutoButton.setAttribute("aria-pressed", auto ? "true" : "false");
+  elements.iterationsInput.disabled = auto;
+  elements.iterationsGuidance.textContent = auto
+    ? "The assistant will choose a step budget for each task."
+    : "Use the number field to set the maximum step budget yourself.";
+}
+
+function resolveIterationBudget(task) {
+  if (state.settings.maxIterationsAuto === false) {
+    return clampInteger(state.settings.maxIterations, 2, 30, DEFAULT_SETTINGS.maxIterations);
+  }
+
+  const normalized = String(task || "").toLowerCase();
+  let budget = 8;
+  if (normalized.split(/\s+/).filter(Boolean).length >= 8) {
+    budget += 2;
+  }
+  if (/\b(and|then|after|before|compare|monitor|sign in|log in|fill|submit|checkout|search|research)\b/.test(normalized)) {
+    budget += 2;
+  }
+  if (/\b(click|type|enter|open|go to|navigate|summari[sz]e|explain|inspect)\b/.test(normalized)) {
+    budget += 1;
+  }
+
+  return clampInteger(budget, 6, 20, DEFAULT_SETTINGS.maxIterations);
+}
+
+function toggleSettingsPanel(force) {
+  if (state.preferences.agentPaneOpen === false) {
+    state.preferences.agentPaneOpen = true;
+  }
+
+  state.preferences.settingsPanelOpen = typeof force === "boolean"
+    ? force
+    : !state.preferences.settingsPanelOpen;
+  persistPreferences();
+  applyLayoutState();
 }
 
 function getAgentScrollStep() {
@@ -1015,7 +1119,7 @@ function updateAgentScrollButtons() {
   const maxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
   const atTop = pane.scrollTop <= 1;
   const atBottom = maxScroll <= 1 || pane.scrollTop >= maxScroll - 1;
-  const paneOpen = state.preferences.agentPaneOpen !== false;
+  const paneOpen = state.preferences.agentPaneOpen !== false && state.preferences.settingsPanelOpen !== true;
 
   elements.agentScrollUpButton.disabled = !paneOpen || atTop;
   elements.agentScrollDownButton.disabled = !paneOpen || atBottom;
@@ -1040,7 +1144,7 @@ async function refreshModels({ silent }) {
     state.modelCatalog = normalizeModelCatalog([{ name: state.settings.model }], state.settings.model);
     populateModelOptions(state.modelCatalog, state.settings.model);
     if (!silent) {
-      setFeedback(error.message, "error");
+      setFeedback(formatAppError(error), "error");
     }
   }
 }
@@ -1059,7 +1163,7 @@ async function testConnection() {
       : " No vision model detected yet.";
     setFeedback(`Connection ok. ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} available.${suffix}`, "success");
   } catch (error) {
-    setFeedback(error.message, "error");
+    setFeedback(formatAppError(error), "error");
   }
 }
 
@@ -1180,6 +1284,14 @@ function setFeedback(message, tone) {
   elements.settingsFeedback.className = `feedback${tone ? ` ${tone}` : ""}`;
 }
 
+function formatAppError(error) {
+  const message = String(error?.message || error || "Unknown error").trim();
+  return message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .trim();
+}
+
 function syncAddressBar() {
   const tab = getActiveTab();
   elements.addressInput.value = formatDisplayUrl(tab?.url || "");
@@ -1234,27 +1346,73 @@ async function navigateActiveTab(input) {
 async function reloadActiveTab() {
   const tab = getActiveTab();
   if (!tab) {
-    return;
+    return {
+      ok: false,
+      error: "No active tab selected.",
+      failureCategory: "navigation"
+    };
   }
   await waitForWebviewDomReady(tab.webview);
   tab.webview.reload();
   await waitForLoad(tab.webview);
+  return {
+    ok: true,
+    currentTabId: tab.id,
+    tab: serializeTab(tab),
+    summary: `Reloaded ${tab.title || "the current tab"}.`
+  };
 }
 
 async function goBack() {
   const tab = getActiveTab();
-  if (tab?.domReady && tab.webview?.canGoBack()) {
-    tab.webview.goBack();
-    await waitForLoad(tab.webview, 10000, true);
+  if (!tab) {
+    return {
+      ok: false,
+      error: "No active tab selected.",
+      failureCategory: "navigation"
+    };
   }
+  if (!tab.domReady || !tab.webview?.canGoBack()) {
+    return {
+      ok: false,
+      error: "The current tab cannot go back.",
+      failureCategory: "no_state_change"
+    };
+  }
+  tab.webview.goBack();
+  await waitForLoad(tab.webview, 10000, true);
+  return {
+    ok: true,
+    currentTabId: tab.id,
+    tab: serializeTab(tab),
+    summary: `Moved back in ${tab.title || "the current tab"}.`
+  };
 }
 
 async function goForward() {
   const tab = getActiveTab();
-  if (tab?.domReady && tab.webview?.canGoForward()) {
-    tab.webview.goForward();
-    await waitForLoad(tab.webview, 10000, true);
+  if (!tab) {
+    return {
+      ok: false,
+      error: "No active tab selected.",
+      failureCategory: "navigation"
+    };
   }
+  if (!tab.domReady || !tab.webview?.canGoForward()) {
+    return {
+      ok: false,
+      error: "The current tab cannot go forward.",
+      failureCategory: "no_state_change"
+    };
+  }
+  tab.webview.goForward();
+  await waitForLoad(tab.webview, 10000, true);
+  return {
+    ok: true,
+    currentTabId: tab.id,
+    tab: serializeTab(tab),
+    summary: `Moved forward in ${tab.title || "the current tab"}.`
+  };
 }
 
 async function runAgentTask(taskValue) {
@@ -1269,6 +1427,18 @@ async function runAgentTask(taskValue) {
     return;
   }
 
+  const directConversationReply = buildDirectConversationReply(task);
+  if (directConversationReply) {
+    appendConversation("user", task);
+    elements.taskInput.value = "";
+    state.currentTask = task;
+    state.lastResult = directConversationReply;
+    appendConversation("assistant", directConversationReply);
+    pushLog("assistant", directConversationReply);
+    renderState();
+    return;
+  }
+
   if (!getActiveTab()) {
     pushLog("error", "No active tab is available.");
     return;
@@ -1276,11 +1446,12 @@ async function runAgentTask(taskValue) {
 
   state.settings = readSettingsForm();
   persistSettings();
+  const maxTurns = resolveIterationBudget(task);
   state.running = true;
   state.abortRequested = false;
   state.currentTask = task;
   state.lastResult = "Working through the current task.";
-  state.currentStep = { step: 0, total: state.settings.maxIterations, label: "starting" };
+  state.currentStep = { step: 0, total: maxTurns, label: "starting" };
   appendConversation("user", task);
   elements.taskInput.value = "";
   renderState();
@@ -1290,7 +1461,7 @@ async function runAgentTask(taskValue) {
   recordTaskTelemetryStart(taskId, task);
   const budget = {
     used: 0,
-    total: state.settings.maxIterations
+    total: maxTurns
   };
 
   try {
@@ -1350,11 +1521,12 @@ async function runAgentTask(taskValue) {
     pushLog("success", finalAnswer);
     renderState();
   } catch (error) {
+    const userFacingError = formatAppError(error);
     failGoalMemory(taskId, error);
-    recordTaskTelemetryFinish(taskId, "blocked", [], error.message);
-    state.lastResult = error.message;
-    appendConversation("assistant", `I ran into an error while working on that: ${error.message}`);
-    pushLog("error", error.message);
+    recordTaskTelemetryFinish(taskId, "blocked", [], userFacingError);
+    state.lastResult = userFacingError;
+    appendConversation("assistant", `I ran into an error while working on that: ${userFacingError}`);
+    pushLog("error", userFacingError);
   } finally {
     state.running = false;
     state.abortRequested = false;
@@ -1670,6 +1842,17 @@ async function executeToolCallFromModel({ toolCall, stepIndex, taskId, budget })
     };
   }
 
+  const invalidArgumentsResult = validateToolArguments(name, args);
+  if (invalidArgumentsResult) {
+    recordToolTelemetry(name, invalidArgumentsResult);
+    pushLog("error", summarizeToolResult(name, invalidArgumentsResult));
+    return {
+      name,
+      transcriptResult: invalidArgumentsResult,
+      visualGroundingMessage: null
+    };
+  }
+
   const policyDecision = await evaluateSafetyPolicy(name, args);
   if (policyDecision.blocked) {
     const blockedResult = { ok: false, error: policyDecision.reason, failureCategory: "policy_blocked" };
@@ -1751,6 +1934,7 @@ async function requestModelTurn({ label, messages, tools, budget }) {
 }
 
 async function executeTool(name, args) {
+  await ensurePageObservationBaseline(name);
   switch (name) {
     case "get_active_tab":
       return {
@@ -1767,38 +1951,49 @@ async function executeTool(name, args) {
       };
     case "switch_to_tab":
       return withPageStateDiff("switch_to_tab", await switchToTab(args));
-    case "open_new_tab":
-      return withPageStateDiff("open_new_tab", await openNewTab(args));
+    case "open_new_tab": {
+      const openedTabResult = await openNewTab(args);
+      return withPageStateDiff("open_new_tab", openedTabResult, {
+        tabId: openedTabResult.openedTabId || openedTabResult.currentTabId
+      });
+    }
     case "open_or_search":
       return withPageStateDiff("open_or_search", await openOrSearch(args));
     case "navigate_to":
       return withPageStateDiff("navigate_to", await navigateTo(args));
     case "reload_tab":
-      await reloadActiveTab();
-      return withPageStateDiff("reload_tab", { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Reloaded ${getActiveTab()?.title || "the current tab"}.` });
+      return withPageStateDiff("reload_tab", await reloadActiveTab());
     case "go_back":
-      await goBack();
-      return withPageStateDiff("go_back", { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Moved back in ${getActiveTab()?.title || "the current tab"}.` });
+      return withPageStateDiff("go_back", await goBack());
     case "go_forward":
-      await goForward();
-      return withPageStateDiff("go_forward", { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Moved forward in ${getActiveTab()?.title || "the current tab"}.` });
+      return withPageStateDiff("go_forward", await goForward());
     case "close_current_tab":
       return withPageStateDiff("close_current_tab", await closeCurrentTab());
     case "inspect_page":
       return inspectPage(args);
     case "click_element":
-      return withPageStateDiff("click_element", await runPageCommand("clickElement", { elementId: args.elementId }));
+      return withPageStateDiff("click_element", await runPageCommand("clickElement", {
+        elementId: args.elementId,
+        elementHint: args.elementHint || ""
+      }));
     case "type_into_element":
       return withPageStateDiff("type_into_element", await runPageCommand("typeIntoElement", {
         elementId: args.elementId,
+        elementHint: args.elementHint || "",
         text: String(args.text || ""),
         clearFirst: args.clearFirst !== false,
         submit: args.submit === true
       }));
     case "hover_element":
-      return withPageStateDiff("hover_element", await runPageCommand("hoverElement", { elementId: args.elementId }));
+      return withPageStateDiff("hover_element", await runPageCommand("hoverElement", {
+        elementId: args.elementId,
+        elementHint: args.elementHint || ""
+      }));
     case "move_mouse_to_element":
-      return runPageCommand("moveMouseToElement", { elementId: args.elementId });
+      return runPageCommand("moveMouseToElement", {
+        elementId: args.elementId,
+        elementHint: args.elementHint || ""
+      });
     case "move_mouse_to_coordinates":
       return runPageCommand("moveMouseToCoordinates", {
         x: args.x,
@@ -1811,7 +2006,10 @@ async function executeTool(name, args) {
         amount: normalizeAmount(args.amount)
       }));
     case "read_element_text":
-      return runPageCommand("readElementText", { elementId: args.elementId });
+      return runPageCommand("readElementText", {
+        elementId: args.elementId,
+        elementHint: args.elementHint || ""
+      });
     case "wait":
       await sleep(clampInteger(args.milliseconds, 100, 10000, 1000));
       return { ok: true, summary: `Waited ${clampInteger(args.milliseconds, 100, 10000, 1000)} ms.` };
@@ -1820,7 +2018,7 @@ async function executeTool(name, args) {
   }
 }
 
-function switchToTab(args) {
+async function switchToTab(args) {
   const requestedId = String(args.tabId || "");
   let tab = requestedId ? state.tabs.find((entry) => entry.id === requestedId) : null;
   if (!tab && args.query) {
@@ -1836,6 +2034,8 @@ function switchToTab(args) {
   }
 
   selectTab(tab.id);
+  await ensureTabIsLoaded(tab);
+  await waitForDomReady(tab.webview);
   return {
     ok: true,
     currentTabId: tab.id,
@@ -1844,7 +2044,7 @@ function switchToTab(args) {
   };
 }
 
-function openNewTab(args) {
+async function openNewTab(args) {
   const nextTab = createTab(args.url || START_PAGE_URL);
   if (args.active === false) {
     const previous = state.tabs.find((tab) => tab.id !== nextTab.id);
@@ -1852,16 +2052,25 @@ function openNewTab(args) {
       selectTab(previous.id);
     }
   }
+  await waitForDomReady(nextTab.webview);
 
   return {
     ok: true,
-    currentTabId: nextTab.id,
+    currentTabId: getActiveTab()?.id || nextTab.id,
+    openedTabId: nextTab.id,
     tab: serializeTab(nextTab),
     summary: args.url ? `Opened a new tab at ${normalizeDestination(args.url)}.` : "Opened a new tab."
   };
 }
 
 async function openOrSearch(args) {
+  if (!String(args.query || "").trim()) {
+    return {
+      ok: false,
+      error: "open_or_search requires a query or destination.",
+      failureCategory: "invalid_arguments"
+    };
+  }
   await navigateActiveTab(String(args.query || ""));
   const tab = getActiveTab();
   return {
@@ -1925,12 +2134,17 @@ async function inspectPage(args) {
   };
 }
 
-async function withPageStateDiff(toolName, result) {
+async function withPageStateDiff(toolName, result, options = {}) {
   if (result?.ok === false || !TOOLS_WITH_PAGE_STATE_DIFF.has(toolName)) {
     return result;
   }
 
-  const observation = await observeCurrentPage({
+  const targetTab = options.tabId
+    ? state.tabs.find((tab) => tab.id === options.tabId) || null
+    : result?.currentTabId
+      ? state.tabs.find((tab) => tab.id === result.currentTabId) || getActiveTab()
+      : getActiveTab();
+  const observation = await observePageForTab(targetTab, {
     includeText: false,
     includeMetadata: true,
     includeScreenshot: false,
@@ -1940,6 +2154,7 @@ async function withPageStateDiff(toolName, result) {
 
   return {
     ...result,
+    observedTabId: targetTab?.id || null,
     pageState: buildCompactPageState(observation.page),
     pageStateDiff: observation.pageStateDiff,
     summary: mergeSummaries(result.summary, observation.pageStateDiff?.summary)
@@ -1947,12 +2162,15 @@ async function withPageStateDiff(toolName, result) {
 }
 
 async function observeCurrentPage(options = {}) {
-  const tab = getActiveTab();
+  return observePageForTab(getActiveTab(), options);
+}
+
+async function observePageForTab(tab, options = {}) {
   if (!tab?.webview) {
     throw new Error("No active browser tab is available.");
   }
 
-  const page = await runPageCommand("snapshot", {
+  const page = await runPageCommandForTab(tab, "snapshot", {
     includeText: options.includeText !== false,
     includeMetadata: options.includeMetadata !== false
   });
@@ -1960,13 +2178,21 @@ async function observeCurrentPage(options = {}) {
   let visualContext = null;
   if (options.includeScreenshot !== false) {
     visualContext = await buildVisualGrounding(tab, {
-      includeOcr: options.includeOcr !== false
+    includeOcr: options.includeOcr !== false
     });
     if (visualContext) {
       page.visualGrounding = {
+        ok: true,
         screenshot: visualContext.screenshot,
         ocr: visualContext.ocr,
         summary: visualContext.summary
+      };
+    } else {
+      page.visualGrounding = {
+        ok: false,
+        screenshot: null,
+        ocr: null,
+        summary: "Screenshot grounding was unavailable for this observation."
       };
     }
   }
@@ -1983,7 +2209,10 @@ async function observeCurrentPage(options = {}) {
 }
 
 async function runPageCommand(type, payload) {
-  const tab = getActiveTab();
+  return runPageCommandForTab(getActiveTab(), type, payload);
+}
+
+async function runPageCommandForTab(tab, type, payload) {
   if (!tab?.webview) {
     throw new Error("No active browser tab is available.");
   }
@@ -1999,6 +2228,25 @@ async function runPageCommand(type, payload) {
     currentTabId: tab.id,
     ...result
   };
+}
+
+async function ensurePageObservationBaseline(toolName) {
+  const tab = getActiveTab();
+  if (!tab?.webview || !TOOL_BASELINE_REQUIRED.has(toolName) || tab.lastObservedPage) {
+    return;
+  }
+
+  try {
+    await observePageForTab(tab, {
+      includeText: false,
+      includeMetadata: true,
+      includeScreenshot: false,
+      includeOcr: false,
+      includeDiff: false
+    });
+  } catch (error) {
+    pushLog("warn", `Unable to capture a pre-action page baseline: ${error.message}`);
+  }
 }
 
 async function buildVisualGrounding(tab, { includeOcr }) {
@@ -2023,6 +2271,7 @@ async function buildVisualGrounding(tab, { includeOcr }) {
   }
 
   return {
+    ok: true,
     imageBase64: screenshot.imageBase64,
     screenshot: {
       width: screenshot.width,
@@ -2289,6 +2538,71 @@ function normalizeAssistantMessage(message = {}) {
   };
 }
 
+function buildDirectConversationReply(task) {
+  const normalized = normalizeConversationIntentText(task);
+  if (!normalized) {
+    return null;
+  }
+
+  if (isPureGreeting(normalized)) {
+    return "Hi. I can inspect the current page, summarize what is visible, explain forms and buttons, and take browser actions like click, type, search, and navigate. Try \"summarize this page\" or \"click the top result.\"";
+  }
+
+  if (isPureThanks(normalized)) {
+    return "Happy to help. If you want, I can inspect this page or take the next browser step for you.";
+  }
+
+  if (isCapabilityQuestion(normalized) && !hasBrowserTaskHints(normalized)) {
+    return "I can inspect the current page, summarize what is visible, explain what is on screen, click buttons, type into forms, search, navigate, compare options, and monitor pages. Try \"what do you see?\", \"summarize this page\", or \"click the top result.\"";
+  }
+
+  if (isIdentityQuestion(normalized) && !hasBrowserTaskHints(normalized)) {
+    return "I am your browser assistant inside ElectronBrowser. I can read the current page, explain it, and take browser actions when you ask.";
+  }
+
+  if (isStatusQuestion(normalized) && !hasBrowserTaskHints(normalized)) {
+    return "I am ready. Ask me to summarize this page, explain what is on screen, or take a browser action like click, type, search, or navigate.";
+  }
+
+  return null;
+}
+
+function normalizeConversationIntentText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function hasBrowserTaskHints(value) {
+  const text = normalizeConversationIntentText(value);
+  return [
+    /\b(click|tap|press|open|open up|search|find|look up|research|go to|navigate|visit|scroll|type|enter|fill|submit|compare|monitor|watch|reload|go back|back|forward|switch|close|hover|move|read|inspect|summari[sz]e|explain|describe)\b/i,
+    /\b(this page|current page|current tab|this tab|site|website|tab|url|button|link|form|search results|browser)\b/i,
+    /\b(sign in|log in|login|password|checkout|buy|pay|upload|download)\b/i
+  ].some((pattern) => pattern.test(text));
+}
+
+function isPureGreeting(value) {
+  return /^(hi|hello|hey|heya|hiya|yo|sup|what'?s up|good morning|good afternoon|good evening)( there)?[!.?]*$/i.test(value);
+}
+
+function isPureThanks(value) {
+  return /^(thanks|thank you|thanks a lot|thank you very much|thx|ty)[!.?]*$/i.test(value);
+}
+
+function isCapabilityQuestion(value) {
+  return /^(help|what can you do|what do you do|how can you help|what are you able to do|show me what you can do)\??$/i.test(value);
+}
+
+function isIdentityQuestion(value) {
+  return /^(who are you|what are you)\??$/i.test(value);
+}
+
+function isStatusQuestion(value) {
+  return /^(how are you|are you there|you there|ready|are you ready)\??$/i.test(value);
+}
+
 function normalizeArguments(argumentsValue) {
   if (!argumentsValue) {
     return {};
@@ -2298,11 +2612,41 @@ function normalizeArguments(argumentsValue) {
     try {
       return JSON.parse(argumentsValue);
     } catch {
-      return {};
+      return {
+        __parseError: "Tool call arguments were not valid JSON."
+      };
     }
   }
 
   return argumentsValue;
+}
+
+function validateToolArguments(name, args) {
+  if (args?.__parseError) {
+    return {
+      ok: false,
+      error: args.__parseError,
+      failureCategory: "invalid_arguments"
+    };
+  }
+
+  const definition = TOOL_DEFINITION_MAP.get(name);
+  const required = Array.isArray(definition?.function?.parameters?.required)
+    ? definition.function.parameters.required
+    : [];
+
+  for (const field of required) {
+    const value = args?.[field];
+    if (value === undefined || value === null || typeof value === "string" && !value.trim()) {
+      return {
+        ok: false,
+        error: `${name} requires "${field}".`,
+        failureCategory: "invalid_arguments"
+      };
+    }
+  }
+
+  return null;
 }
 
 function buildReasoningSummary(message) {
@@ -2422,8 +2766,11 @@ function formatObservationForPrompt(page, { includeVisibleText } = {}) {
       ? `Forms: ${page.forms.slice(0, 4).map((entry) => `${entry.name || "unnamed form"} with ${entry.fieldCount} fields`).join("; ")}`
       : "Forms: none detected",
     page.interactiveElements?.length
-      ? `Top interactive elements: ${page.interactiveElements.slice(0, 8).map((entry) => `#${entry.rank} ${entry.tag}${entry.text ? ` "${truncate(entry.text, 60)}"` : ""}`).join("; ")}`
+      ? `Top interactive elements: ${page.interactiveElements.slice(0, 8).map((entry) => `#${entry.rank} id=${entry.id} ${entry.tag}${entry.label ? ` label="${truncate(entry.label, 40)}"` : ""}${entry.text ? ` text="${truncate(entry.text, 60)}"` : ""}`).join("; ")}`
       : "Top interactive elements: none detected",
+    page.visualGrounding?.ok === false
+      ? "Visual grounding: unavailable for this observation."
+      : "",
     page.visualGrounding?.ocr?.ok && page.visualGrounding.ocr.text
       ? `OCR excerpt: ${truncate(page.visualGrounding.ocr.text, 500)}`
       : ""
@@ -2966,6 +3313,9 @@ function collectPolicyTargetHints(toolName, args, observedPage) {
   if (typeof args?.text === "string") {
     hints.push(args.text);
   }
+  if (typeof args?.elementHint === "string") {
+    hints.push(args.elementHint);
+  }
 
   const target = findObservedElementById(observedPage, args?.elementId);
   if (target) {
@@ -2985,6 +3335,11 @@ function findObservedElementById(observedPage, elementId) {
 }
 
 function categorizeExecutionFailure({ verification, lastToolExecution, observation }) {
+  const explicitFailureCategory = lastToolExecution?.transcriptResult?.failureCategory;
+  if (explicitFailureCategory) {
+    return explicitFailureCategory;
+  }
+
   const combined = [
     verification?.reason || "",
     verification?.evidence || "",
@@ -2999,8 +3354,14 @@ function categorizeExecutionFailure({ verification, lastToolExecution, observati
   if (combined.includes("login") || combined.includes("sign in") || combined.includes("authentication")) {
     return "auth_wall";
   }
+  if (combined.includes("ambiguous") || combined.includes("multiple similar elements")) {
+    return "ambiguous_element";
+  }
   if (combined.includes("not found") || combined.includes("inspect the page again") || combined.includes("missing")) {
     return "missing_element";
+  }
+  if (combined.includes("did not keep the expected value") || combined.includes("input was rejected")) {
+    return "input_rejected";
   }
   if (combined.includes("timed out") || combined.includes("navigation failed") || combined.includes("unable to restore")) {
     return "navigation";
@@ -3042,6 +3403,8 @@ async function attemptAutomaticRecovery({ taskId, step, verification, failureCat
       nextActionHint = "Help the browser complete login or provide credentials manually.";
       break;
     case "missing_element":
+    case "ambiguous_element":
+    case "input_rejected":
       await observeCurrentPage({
         includeText: false,
         includeMetadata: true,
@@ -3049,7 +3412,9 @@ async function attemptAutomaticRecovery({ taskId, step, verification, failureCat
         includeOcr: false,
         includeDiff: true
       });
-      note = "Re-inspected the page after an element lookup failure.";
+      note = failureCategory === "input_rejected"
+        ? "Re-inspected the page after the page rejected input."
+        : "Re-inspected the page after an element lookup failure.";
       success = true;
       break;
     case "navigation":

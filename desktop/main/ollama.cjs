@@ -17,14 +17,23 @@ async function listModels(settings) {
   }
 
   const payload = await response.json();
-  return Array.isArray(payload.models)
-    ? payload.models.map((model) => ({
+  if (!Array.isArray(payload.models)) {
+    return [];
+  }
+
+  return Promise.all(payload.models.map(async (model) => {
+    const baseModel = {
       name: model.name,
       size: model.size || 0,
       modified: model.modified_at || "",
       details: model.details || {}
-    }))
-    : [];
+    };
+
+    return {
+      ...baseModel,
+      capabilities: await describeModelCapabilities(settings, baseModel)
+    };
+  }));
 }
 
 async function chat(settings, messages, tools) {
@@ -59,6 +68,30 @@ async function testConnection(settings) {
     modelCount: models.length,
     models
   };
+}
+
+async function describeModelCapabilities(settings, model) {
+  try {
+    const payload = await showModel(settings, model.name);
+    return normalizeModelCapabilities(payload, model);
+  } catch {
+    return inferModelCapabilities(model);
+  }
+}
+
+async function showModel(settings, modelName) {
+  const endpoint = `${normalizeBaseUrl(settings.baseUrl)}/show`;
+  const response = await fetchWithTimeout(endpoint, {
+    method: "POST",
+    headers: buildHeaders(settings),
+    body: JSON.stringify({ model: modelName })
+  }, 15000);
+
+  if (!response.ok) {
+    throw new Error(`Unable to inspect model ${modelName}.`);
+  }
+
+  return response.json();
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {
@@ -159,6 +192,50 @@ async function safeReadBody(response) {
 function truncateText(value, maxLength) {
   const text = String(value || "");
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text;
+}
+
+function normalizeModelCapabilities(payload, model) {
+  const capabilities = new Set();
+  const rawValues = [
+    ...(Array.isArray(payload?.capabilities) ? payload.capabilities : []),
+    ...(Array.isArray(payload?.details?.capabilities) ? payload.details.capabilities : []),
+    ...(Array.isArray(model?.details?.capabilities) ? model.details.capabilities : [])
+  ];
+
+  for (const value of rawValues) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized) {
+      capabilities.add(normalized);
+    }
+  }
+
+  const templateText = [
+    payload?.template || "",
+    payload?.modelfile || "",
+    payload?.system || ""
+  ].join(" ").toLowerCase();
+
+  if (looksLikeVisionModel(model?.name)) {
+    capabilities.add("vision");
+  }
+  if (/tool[_\s-]?calls?|function[_\s-]?calls?|\btools?\b/.test(templateText)) {
+    capabilities.add("tools");
+  }
+
+  return Array.from(capabilities);
+}
+
+function inferModelCapabilities(model) {
+  const capabilities = new Set();
+  if (looksLikeVisionModel(model?.name)) {
+    capabilities.add("vision");
+  }
+  return Array.from(capabilities);
+}
+
+function looksLikeVisionModel(modelName) {
+  const name = String(modelName || "").toLowerCase();
+  return /vision|llava|bakllava|qwen2(\.5)?-vl|minicpm[-:]?v|internvl|cogvlm|pixtral|molmo|moondream|gemma3|llama3(\.2)?[-:]vision/.test(name);
 }
 
 module.exports = {

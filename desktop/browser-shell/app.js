@@ -456,6 +456,11 @@ function bindEvents() {
   elements.modelSelect.addEventListener("change", () => {
     updateModelGuidance(state.modelCatalog, elements.modelSelect.value);
   });
+  document.querySelectorAll("[data-close-notice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      dismissNotice(button.dataset.closeNotice);
+    });
+  });
   elements.iterationsAutoButton.addEventListener("click", () => {
     state.settings.maxIterationsAuto = state.settings.maxIterationsAuto === false;
     updateIterationsModeUi();
@@ -933,9 +938,10 @@ function persistTelemetry() {
 }
 
 function syncMemoryPreferencesFromSettings() {
+  const selectedModelEntry = state.modelCatalog.find((entry) => entry.name === state.settings.model);
   state.memory.userPreferences.assistant = {
     preferredModel: state.settings.model,
-    preferredModelCapability: modelSupportsVision(state.settings.model) ? "vision" : "not-preferred",
+    preferredModelCapability: selectedModelEntry?.capability || "not-preferred",
     approvalMode: state.settings.approvalMode || DEFAULT_SETTINGS.approvalMode,
     temperature: state.settings.temperature,
     maxIterations: state.settings.maxIterations,
@@ -1074,7 +1080,7 @@ async function refreshModels({ silent }) {
       const recommendation = recommendModel(state.modelCatalog);
       const suffix = recommendation
         ? ` Recommended: ${recommendation.name} (${recommendation.capabilityLabel.toLowerCase()}).`
-        : " No vision model detected yet.";
+        : " No preferred model detected yet.";
       setFeedback(`Found ${models.length} local model${models.length === 1 ? "" : "s"}.${suffix}`, "success");
     }
   } catch (error) {
@@ -1097,7 +1103,7 @@ async function testConnection() {
     const recommendation = recommendModel(state.modelCatalog);
     const suffix = recommendation
       ? ` Recommended: ${recommendation.name} (${recommendation.capabilityLabel.toLowerCase()}).`
-      : " No vision model detected yet.";
+      : " No preferred model detected yet.";
     setFeedback(`Connection ok. ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} available.${suffix}`, "success");
   } catch (error) {
     setFeedback(formatAppError(error), "error");
@@ -1122,18 +1128,27 @@ function populateModelOptions(models, selectedModel) {
 
 function normalizeModelCatalog(models, selectedModel) {
   const rawEntries = Array.isArray(models) ? models : [];
-  const names = rawEntries.map((model) => typeof model === "string" ? model : model.name).filter(Boolean);
+  const modelsByName = new Map(rawEntries
+    .map((model) => typeof model === "string" ? { name: model } : model)
+    .filter((model) => model?.name)
+    .map((model) => [model.name, model]));
+  const names = Array.from(modelsByName.keys());
   if (selectedModel && !names.includes(selectedModel)) {
     names.unshift(selectedModel);
   }
 
   return names
     .map((name) => {
-      const capability = modelSupportsVision(name) ? "vision" : "not-preferred";
+      const model = modelsByName.get(name) || { name };
+      const supportsVision = modelSupportsVision(model);
+      const supportsTools = modelSupportsTools(model);
+      const capability = supportsVision && supportsTools ? "preferred" : "not-preferred";
       return {
         name,
+        supportsVision,
+        supportsTools,
         capability,
-        capabilityLabel: capability === "vision" ? "Vision" : "Not preferred",
+        capabilityLabel: capability === "preferred" ? "Preferred" : "Not preferred",
         recommendationScore: getModelRecommendationScore(name, capability)
       };
     })
@@ -1151,37 +1166,44 @@ function updateModelGuidance(entries, selectedModel) {
   const recommendation = recommendModel(catalog);
 
   if (!selectedEntry) {
-    elements.modelGuidance.textContent = "Refresh models to detect whether a vision-capable model is available.";
-    elements.modelGuidance.className = "model-guidance not-preferred";
+    showNotice(elements.modelGuidance, "Refresh models to detect whether a preferred model is available.", "not-preferred");
     return;
   }
 
-  if (selectedEntry.capability === "vision") {
+  if (selectedEntry.capability === "preferred") {
     const suffix = recommendation && recommendation.name !== selectedEntry.name
       ? ` Another strong option is ${recommendation.name}.`
-      : " This model can use screenshot grounding directly.";
-    elements.modelGuidance.textContent = `${selectedEntry.name} is a vision model and is preferred for this browser.${suffix}`;
-    elements.modelGuidance.className = "model-guidance vision";
+      : " This model supports both screenshot grounding and tool calling.";
+    showNotice(elements.modelGuidance, `${selectedEntry.name} is preferred for this browser.${suffix}`, "preferred");
     return;
   }
+
+  const missingReasons = [];
+  if (!selectedEntry.supportsVision) {
+    missingReasons.push("direct screenshot grounding");
+  }
+  if (!selectedEntry.supportsTools) {
+    missingReasons.push("tool calling");
+  }
+  const missingText = missingReasons.length
+    ? ` because ${selectedEntry.name} does not advertise ${joinWithAnd(missingReasons)}`
+    : "";
 
   if (recommendation) {
-    elements.modelGuidance.textContent = `${selectedEntry.name} is not preferred because it cannot use screenshot grounding directly. Recommended: ${recommendation.name} (Vision).`;
-    elements.modelGuidance.className = "model-guidance not-preferred";
+    showNotice(elements.modelGuidance, `${selectedEntry.name} is not preferred${missingText}. Recommended: ${recommendation.name} (Preferred).`, "not-preferred");
     return;
   }
 
-  elements.modelGuidance.textContent = `${selectedEntry.name} is not preferred for browser perception. Install or pull a vision-capable Ollama model for screenshot grounding.`;
-  elements.modelGuidance.className = "model-guidance not-preferred";
+  showNotice(elements.modelGuidance, `${selectedEntry.name} is not preferred${missingText}. Pull a model with both vision and tool calling to make it preferred.`, "not-preferred");
 }
 
 function recommendModel(entries) {
   const catalog = Array.isArray(entries) ? entries : [];
-  return catalog.find((entry) => entry.capability === "vision") || null;
+  return catalog.find((entry) => entry.capability === "preferred") || null;
 }
 
 function getModelRecommendationScore(name, capability) {
-  if (capability !== "vision") {
+  if (capability !== "preferred") {
     return 0;
   }
 
@@ -1217,8 +1239,7 @@ function getModelRecommendationScore(name, capability) {
 }
 
 function setFeedback(message, tone) {
-  elements.settingsFeedback.textContent = message;
-  elements.settingsFeedback.className = `feedback${tone ? ` ${tone}` : ""}`;
+  showNotice(elements.settingsFeedback, message, tone || "");
 }
 
 function formatAppError(error) {
@@ -1227,6 +1248,61 @@ function formatAppError(error) {
     .replace(/^Error invoking remote method '[^']+':\s*/i, "")
     .replace(/^Error:\s*/i, "")
     .trim();
+}
+
+function showNotice(element, message, tone = "") {
+  if (!element) {
+    return;
+  }
+
+  if (!element.dataset.baseClass) {
+    element.dataset.baseClass = element.className;
+  }
+
+  const messageNode = element.querySelector(".notice-message");
+  if (messageNode) {
+    messageNode.textContent = message;
+  } else {
+    element.textContent = message;
+  }
+
+  element.hidden = false;
+  element.setAttribute("aria-hidden", "false");
+  element.dataset.dismissed = "false";
+  element.className = `${element.dataset.baseClass}${tone ? ` ${tone}` : ""}`;
+}
+
+function dismissNotice(id) {
+  const element = document.getElementById(id);
+  if (!element) {
+    return;
+  }
+  element.hidden = true;
+  element.setAttribute("aria-hidden", "true");
+  element.dataset.dismissed = "true";
+}
+
+function joinWithAnd(values) {
+  const entries = values.filter(Boolean);
+  if (!entries.length) {
+    return "";
+  }
+  if (entries.length === 1) {
+    return entries[0];
+  }
+  return `${entries.slice(0, -1).join(", ")} and ${entries.at(-1)}`;
+}
+
+function normalizeModelCapabilities(model) {
+  const raw = [
+    ...(Array.isArray(model?.capabilities) ? model.capabilities : []),
+    ...(Array.isArray(model?.details?.capabilities) ? model.details.capabilities : [])
+  ];
+  return new Set(raw.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+}
+
+function modelSupportsTools(model) {
+  return normalizeModelCapabilities(model).has("tools");
 }
 
 function syncAddressBar() {
@@ -2374,7 +2450,11 @@ function buildVisualGroundingMessage(modelName, toolName, result) {
 }
 
 function modelSupportsVision(modelName) {
-  const name = String(modelName || "");
+  if (normalizeModelCapabilities(modelName).has("vision")) {
+    return true;
+  }
+
+  const name = typeof modelName === "string" ? modelName : modelName?.name || "";
   return VISION_MODEL_PATTERNS.some((pattern) => pattern.test(name));
 }
 
@@ -3161,13 +3241,11 @@ function isTrustedOrigin(url) {
 function updatePolicyGuidance(trustedOriginsValue) {
   const trustedOrigins = parseTrustedOrigins(trustedOriginsValue);
   if (!trustedOrigins.length) {
-    elements.policyGuidance.textContent = "No trusted origins saved yet. Mutating actions outside obviously safe contexts will ask for approval.";
-    elements.policyGuidance.className = "policy-guidance warning";
+    showNotice(elements.policyGuidance, "No trusted origins saved yet. Mutating actions outside obviously safe contexts will ask for approval.", "warning");
     return;
   }
 
-  elements.policyGuidance.textContent = `Trusted origins: ${trustedOrigins.join(", ")}. Sensitive or destructive actions still require approval.`;
-  elements.policyGuidance.className = "policy-guidance";
+  showNotice(elements.policyGuidance, `Trusted origins: ${trustedOrigins.join(", ")}. Sensitive or destructive actions still require approval.`);
 }
 
 async function evaluateSafetyPolicy(toolName, args) {

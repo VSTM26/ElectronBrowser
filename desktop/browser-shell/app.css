@@ -936,12 +936,11 @@ select:focus {
   line-height: 1.45;
 }
 
-.feedback {
-  min-height: 22px;
-  margin: 0;
-}
-
-.model-guidance {
+.notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
   margin: -2px 0 0;
   padding: 10px 12px;
   border-radius: 14px;
@@ -950,7 +949,34 @@ select:focus {
   font-size: 13px;
 }
 
-.model-guidance.vision {
+.notice[hidden] {
+  display: none;
+}
+
+.notice-message {
+  margin: 0;
+  flex: 1;
+}
+
+.notice-close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--text-soft);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.notice-close:hover {
+  background: rgba(15, 23, 42, 0.14);
+  color: var(--text);
+}
+
+.model-guidance.preferred {
   color: var(--success);
   background: rgba(15, 159, 97, 0.08);
   border-color: rgba(15, 159, 97, 0.14);
@@ -969,8 +995,6 @@ select:focus {
 }
 
 .policy-guidance {
-  padding: 10px 12px;
-  border-radius: 14px;
   background: rgba(15, 23, 42, 0.04);
   border: 1px solid rgba(15, 23, 42, 0.08);
 }

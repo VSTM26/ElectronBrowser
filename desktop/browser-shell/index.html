@@ -168,7 +168,10 @@
 
                 <label class="field-label" for="model-select">Model</label>
                 <select id="model-select" class="text-input"></select>
-                <p id="model-guidance" class="model-guidance">Vision-capable models are preferred for screenshot grounding.</p>
+                <div id="model-guidance" class="notice model-guidance" role="status">
+                  <p class="notice-message">Preferred models support both screenshot grounding and tool calling.</p>
+                  <button class="notice-close" type="button" data-close-notice="model-guidance" aria-label="Dismiss model guidance">&times;</button>
+                </div>
 
                 <div class="settings-grid">
                   <div>
@@ -187,10 +190,16 @@
 
                 <label class="field-label" for="trusted-origins-input">Trusted origins</label>
                 <textarea id="trusted-origins-input" rows="4" placeholder="github.com&#10;mail.google.com"></textarea>
-                <p id="policy-guidance" class="policy-guidance">Mutating actions on untrusted or sensitive pages may require approval.</p>
+                <div id="policy-guidance" class="notice policy-guidance" role="status">
+                  <p class="notice-message">Mutating actions on untrusted or sensitive pages may require approval.</p>
+                  <button class="notice-close" type="button" data-close-notice="policy-guidance" aria-label="Dismiss policy guidance">&times;</button>
+                </div>
 
                 <button id="save-settings-button" class="primary-button wide" type="button">Save settings</button>
-                <p id="settings-feedback" class="feedback">Settings are stored locally in this browser.</p>
+                <div id="settings-feedback" class="notice feedback" role="status">
+                  <p class="notice-message">Settings are stored locally in this browser.</p>
+                  <button class="notice-close" type="button" data-close-notice="settings-feedback" aria-label="Dismiss settings feedback">&times;</button>
+                </div>
               </section>
 
               <section class="agent-card telemetry-card">

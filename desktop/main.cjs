@@ -1,6 +1,7 @@
 const path = require("path");
 const { app, BrowserWindow, ipcMain, nativeImage, shell } = require("electron");
 const { chat, listModels, testConnection } = require("./main/ollama.cjs");
+const { recognizeScreenshot, shutdownPerception } = require("./main/perception.cjs");
 
 let mainWindow;
 const isMac = process.platform === "darwin";
@@ -84,6 +85,10 @@ app.on("window-all-closed", () => {
   }
 });
 
+app.on("before-quit", () => {
+  void shutdownPerception();
+});
+
 function registerIpcHandlers() {
   ipcMain.handle("app:get-info", () => ({
     name: "Electron",
@@ -104,6 +109,7 @@ function registerIpcHandlers() {
     const { settings, messages, tools } = payload || {};
     return chat(settings || {}, messages || [], tools || []);
   });
+  ipcMain.handle("perception:ocr-screenshot", async (_event, payload) => recognizeScreenshot(payload || {}));
 }
 
 function applyAppIcon() {

@@ -13,7 +13,8 @@ const DEFAULT_SETTINGS = {
   keepAlive: "10m",
   maxIterations: 10,
   requestTimeoutMs: 120000,
-  approvalMode: "auto"
+  approvalMode: "auto",
+  trustedOrigins: ""
 };
 
 const MUTATING_TOOLS = new Set([
@@ -27,6 +28,36 @@ const MUTATING_TOOLS = new Set([
   "reload_tab",
   "type_into_element"
 ]);
+
+const TOOLS_WITH_PAGE_STATE_DIFF = new Set([
+  "switch_to_tab",
+  "open_new_tab",
+  "open_or_search",
+  "navigate_to",
+  "reload_tab",
+  "go_back",
+  "go_forward",
+  "close_current_tab",
+  "click_element",
+  "type_into_element",
+  "hover_element",
+  "scroll_page"
+]);
+
+const VISION_MODEL_PATTERNS = [
+  /vision/i,
+  /llava/i,
+  /bakllava/i,
+  /qwen2(\.5)?-vl/i,
+  /minicpm[-:]?v/i,
+  /internvl/i,
+  /cogvlm/i,
+  /pixtral/i,
+  /molmo/i,
+  /moondream/i,
+  /gemma3/i,
+  /llama3(\.2)?[-:]vision/i
+];
 
 const TOOL_DEFINITIONS = [
   defineTool("get_active_tab", "Return information about the active browser tab including title, URL, and tab id."),
@@ -49,9 +80,12 @@ const TOOL_DEFINITIONS = [
   defineTool("go_back", "Go back in the current tab."),
   defineTool("go_forward", "Go forward in the current tab."),
   defineTool("close_current_tab", "Close the current tab."),
-  defineTool("inspect_page", "Capture the current page state including a stable list of interactive elements. Use this before acting.", {
+  defineTool("inspect_page", "Capture the current page state including ranked interactive elements, landmarks, form summaries, OCR-backed screenshot grounding, and the diff from the previous observation. Use this before acting.", {
     includeText: { type: "boolean", description: "Include a visible text excerpt.", default: true },
-    includeMetadata: { type: "boolean", description: "Include headings and links.", default: true }
+    includeMetadata: { type: "boolean", description: "Include headings, links, and page metadata.", default: true },
+    includeScreenshot: { type: "boolean", description: "Capture a screenshot grounding payload for the current viewport.", default: true },
+    includeOcr: { type: "boolean", description: "Run OCR on the screenshot grounding payload.", default: true },
+    includeDiff: { type: "boolean", description: "Include the diff from the last observed page state for this tab.", default: true }
   }),
   defineTool("click_element", "Click an interactive element on the current page by element id.", {
     elementId: { type: "string", description: "Stable element id from inspect_page." }
@@ -89,11 +123,169 @@ const SYSTEM_PROMPT = [
   "You are an autonomous browser operator inside a local desktop browser shell.",
   "The user may ask for browser actions, summaries, explanations, or help understanding what is on the current page.",
   "Complete the user's request by using the available tools. Inspect the page before taking actions, and inspect before answering questions about what is visible.",
+  "inspect_page returns ranked elements, form and landmark summaries, OCR text, and may attach screenshot grounding for vision-capable models.",
+  "Action tools return explicit page-state diffs. Use those diffs instead of guessing what changed.",
   "A visible cursor appears during movement, hover, typing, and click actions. Use it deliberately so the user can follow what will happen next.",
   "Never invent element ids or tab ids. Use tool outputs exactly as returned.",
   "Keep actions small and verifiable. Re-inspect after navigation or major actions.",
   "Respond conversationally and clearly. When the request is complete, answer like a helpful assistant and include any important caveats."
 ].join(" ");
+
+const PLANNER_SYSTEM_PROMPT = [
+  "You are the planner for a browser automation system.",
+  "Return JSON only with this shape: {\"summary\":string,\"steps\":[{\"objective\":string,\"successCriteria\":string}]}",
+  "Create 1 to 6 short, testable browser steps.",
+  "Each step must have observable success criteria.",
+  "Do not call tools, do not execute the task, and do not produce prose outside the JSON."
+].join(" ");
+
+const EXECUTOR_SYSTEM_PROMPT = [
+  "You are the executor for a browser automation system.",
+  "You may use browser tools, but only to complete the current step.",
+  "Do not invent ids or page facts. Inspect when you need evidence.",
+  "Keep actions small and verifiable.",
+  "When the current step is complete, reply with a concise completion summary instead of more tool calls."
+].join(" ");
+
+const VERIFIER_SYSTEM_PROMPT = [
+  "You are the verifier for a browser automation system.",
+  "Return JSON only with this shape: {\"verdict\":\"complete|retry|blocked\",\"reason\":string,\"evidence\":string,\"nextActionHint\":string}.",
+  "Use the step objective, success criteria, executor summary, tool results, and latest page observation.",
+  "Only return complete when the evidence clearly satisfies the success criteria."
+].join(" ");
+
+const FINALIZER_SYSTEM_PROMPT = [
+  "You are the final response generator for a browser automation system.",
+  "Summarize the completed work clearly for the user.",
+  "Mention blockers or caveats if the task was not fully completed."
+].join(" ");
+
+const MAX_PLAN_STEPS = 6;
+const MAX_STEP_RETRIES = 2;
+const MAX_EXECUTOR_TURNS_PER_ATTEMPT = 4;
+const AGENT_MEMORY_KEY = "desktopAgentMemory";
+const TELEMETRY_KEY = "desktopTelemetry";
+const MAX_MEMORY_DOMAINS = 10;
+const MAX_MEMORY_WORKFLOWS = 12;
+const MAX_MEMORY_CHECKPOINTS = 8;
+const MEMORY_TASK_TOKEN_LIMIT = 8;
+const TELEMETRY_EVENT_LIMIT = 120;
+const WORKFLOW_TASK_SIGNAL_WEIGHT = 4;
+const WORKFLOW_PAGE_SIGNAL_WEIGHT = 1.25;
+const WORKFLOW_NEGATIVE_SIGNAL_WEIGHT = 5;
+const WORKFLOW_SELECTION_SCORE_THRESHOLD = 3;
+const WORKFLOW_CONFIDENCE_THRESHOLD = 0.56;
+const WORKFLOW_CANDIDATE_LIMIT = 3;
+
+const BUILTIN_WORKFLOW_RECIPES = [
+  {
+    id: "search-and-summarize",
+    name: "Search and summarize",
+    matchKeywords: ["search", "find", "look up", "research", "learn about", "read about"],
+    taskSignals: ["search", "find", "look up", "research", "learn about", "read about"],
+    pageSignals: ["search", "results", "google", "docs", "article"],
+    negativeTaskSignals: ["sign in", "log in", "login", "authenticate", "fill out", "submit payment", "monitor", "watch this page"],
+    inputs: ["topic or question"],
+    outputs: ["relevant destination page", "short summary"],
+    successConditions: ["a relevant result or page is opened", "the assistant can summarize the result"],
+    retryRules: ["re-inspect the current page", "refine the search query", "open a stronger result"],
+    steps: ["Inspect the current page or open search", "Navigate to a likely result", "Inspect the chosen page", "Summarize what was found"]
+  },
+  {
+    id: "sign-in",
+    name: "Sign in",
+    matchKeywords: ["sign in", "log in", "login", "authenticate"],
+    taskSignals: ["sign in", "sign into", "log in", "log into", "login", "authenticate"],
+    pageSignals: ["login", "sign in", "password", "authentication"],
+    negativeTaskSignals: ["explain", "summarize", "what is this", "what fields", "describe"],
+    inputs: ["site", "username", "password or auth step"],
+    outputs: ["signed-in session or user escalation"],
+    successConditions: ["credentials fields are filled", "the login action completes", "the site moves past the auth wall"],
+    retryRules: ["re-inspect the login form", "reload once if the form stalls", "escalate to the user for CAPTCHA or MFA"],
+    steps: ["Inspect the login page", "Fill credentials carefully", "Submit the form with approval", "Verify that the authenticated state changed"]
+  },
+  {
+    id: "fill-and-submit",
+    name: "Fill and submit form",
+    matchKeywords: ["fill", "fill out", "submit", "apply", "complete form", "send message"],
+    taskSignals: ["fill", "fill out", "submit", "apply", "complete form", "send message", "send this", "enter my"],
+    pageSignals: ["form", "apply", "contact", "checkout", "compose", "message"],
+    negativeTaskSignals: ["explain", "summarize", "what is this", "what fields", "describe"],
+    inputs: ["field values"],
+    outputs: ["completed form submission"],
+    successConditions: ["required fields are filled", "submit action completes", "confirmation or state change appears"],
+    retryRules: ["re-inspect missing fields", "scroll or switch tabs if the form moved", "reload only if the form is clearly stalled"],
+    steps: ["Inspect the form and required fields", "Fill the required inputs", "Submit with policy checks", "Verify confirmation or changed page state"]
+  },
+  {
+    id: "compare-options",
+    name: "Compare options",
+    matchKeywords: ["compare", "difference", "best", "versus", "vs", "choose"],
+    taskSignals: ["compare", "difference", "best", "versus", "vs", "choose", "better", "which one"],
+    pageSignals: ["compare", "pricing", "plans", "options"],
+    negativeTaskSignals: ["sign in", "log in"],
+    inputs: ["items or pages to compare"],
+    outputs: ["structured comparison", "recommendation"],
+    successConditions: ["multiple relevant pages or sections are inspected", "important differences are extracted", "a comparison summary is returned"],
+    retryRules: ["open another tab for additional options", "re-inspect the comparison page", "switch tabs when context drifts"],
+    steps: ["Identify the items to compare", "Inspect each relevant page or tab", "Extract key differences", "Summarize the comparison"]
+  },
+  {
+    id: "monitor-page",
+    name: "Monitor page",
+    matchKeywords: ["monitor", "watch", "track", "check repeatedly", "notify"],
+    taskSignals: ["monitor", "watch", "track", "check repeatedly", "notify", "alert me", "keep an eye on"],
+    pageSignals: ["tracking", "dashboard", "alerts", "status"],
+    negativeTaskSignals: ["sign in", "log in"],
+    inputs: ["target condition"],
+    outputs: ["latest observed state", "condition status"],
+    successConditions: ["the target page is loaded", "the watch condition is checked", "the current state is reported"],
+    retryRules: ["reload carefully", "re-inspect when layout changes", "pause and escalate on auth walls or CAPTCHAs"],
+    steps: ["Open the target page", "Inspect the watch region", "Check whether the target condition is present", "Report the current state"]
+  },
+  {
+    id: "navigate-and-explain",
+    name: "Navigate and explain",
+    matchKeywords: ["open", "go to", "navigate", "explain", "describe", "summarize", "what is this"],
+    taskSignals: ["open", "go to", "navigate", "explain", "describe", "summarize", "inspect", "walk me through", "what is this", "what's this", "what fields", "what is on this page"],
+    pageSignals: ["docs", "overview", "page", "help"],
+    negativeTaskSignals: ["search", "find", "look up", "research", "learn about", "read about", "compare", "versus", "vs", "monitor", "watch"],
+    inputs: ["destination or current page"],
+    outputs: ["landed destination", "page explanation"],
+    successConditions: ["the target page is visible", "the page structure is inspected", "the assistant can explain what it sees"],
+    retryRules: ["re-inspect after navigation", "go back if the wrong destination opened", "open a new tab when needed"],
+    steps: ["Navigate to the target page", "Inspect the page structure", "Explain the visible content or next actions"]
+  }
+];
+
+const FAILURE_CATEGORIES = {
+  captcha: "CAPTCHA or human verification wall",
+  auth_wall: "Authentication wall",
+  missing_element: "Missing or moved element",
+  navigation: "Navigation or load failure",
+  no_state_change: "Expected state change did not happen",
+  wrong_domain: "Unexpected domain or tab context",
+  policy_blocked: "Safety policy blocked the action",
+  approval_denied: "User denied approval",
+  general: "General execution failure"
+};
+
+const SENSITIVE_ACTION_PATTERNS = [
+  /buy/i,
+  /purchase/i,
+  /checkout/i,
+  /pay/i,
+  /place order/i,
+  /submit payment/i,
+  /delete/i,
+  /remove/i,
+  /close account/i,
+  /log ?out/i,
+  /sign ?out/i,
+  /transfer/i,
+  /wire/i,
+  /cancel subscription/i
+];
 
 const elements = {
   windowShell: document.getElementById("window-shell"),
@@ -129,12 +321,21 @@ const elements = {
   baseUrlInput: document.getElementById("base-url-input"),
   apiKeyInput: document.getElementById("api-key-input"),
   modelSelect: document.getElementById("model-select"),
+  modelGuidance: document.getElementById("model-guidance"),
   temperatureInput: document.getElementById("temperature-input"),
   iterationsInput: document.getElementById("iterations-input"),
+  trustedOriginsInput: document.getElementById("trusted-origins-input"),
+  policyGuidance: document.getElementById("policy-guidance"),
   saveSettingsButton: document.getElementById("save-settings-button"),
   refreshModelsButton: document.getElementById("refresh-models-button"),
   testConnectionButton: document.getElementById("test-connection-button"),
   settingsFeedback: document.getElementById("settings-feedback"),
+  telemetryTaskSuccess: document.getElementById("telemetry-task-success"),
+  telemetryStepSuccess: document.getElementById("telemetry-step-success"),
+  telemetryApprovalRate: document.getElementById("telemetry-approval-rate"),
+  telemetryRecoveryRate: document.getElementById("telemetry-recovery-rate"),
+  telemetryWorkflowSummary: document.getElementById("telemetry-workflow-summary"),
+  telemetryLastFailure: document.getElementById("telemetry-last-failure"),
   clearLogsButton: document.getElementById("clear-logs-button"),
   logs: document.getElementById("logs")
 };
@@ -145,12 +346,15 @@ const state = {
   tabs: [],
   activeTabId: null,
   conversation: loadConversation(),
+  memory: loadAgentMemory(),
+  telemetry: loadTelemetry(),
   running: false,
   abortRequested: false,
   currentTask: "",
   currentStep: null,
   lastResult: "Waiting for a task.",
-  logs: []
+  logs: [],
+  modelCatalog: []
 };
 
 window.__LOCAL_COMET_READY__ = false;
@@ -171,6 +375,7 @@ async function boot() {
 
     bindEvents();
     hydrateSettingsForm();
+    syncMemoryPreferencesFromSettings();
     applyLayoutState();
     renderState();
     startIntroAnimation();
@@ -187,6 +392,8 @@ async function boot() {
     } else {
       restoreSession();
     }
+
+    announceResumableMemory();
 
     window.__LOCAL_COMET_READY__ = true;
     document.body.dataset.ready = "true";
@@ -266,6 +473,12 @@ function bindEvents() {
     state.logs = [];
     renderLogs();
   });
+  elements.modelSelect.addEventListener("change", () => {
+    updateModelGuidance(state.modelCatalog, elements.modelSelect.value);
+  });
+  elements.trustedOriginsInput.addEventListener("input", () => {
+    updatePolicyGuidance(elements.trustedOriginsInput.value);
+  });
 
   document.addEventListener("keydown", (event) => {
     const modifierPressed = event.metaKey || event.ctrlKey;
@@ -310,6 +523,7 @@ function createTab(initialUrl, options = {}) {
     pendingUrl: options.deferLoad === true ? destination : "",
     domReady: false,
     loading: options.deferLoad !== true,
+    lastObservedPage: null,
     webview
   };
 
@@ -367,6 +581,7 @@ function attachWebviewEvents(tab) {
     tab.loading = false;
     tab.url = webview.getURL() || tab.url;
     tab.title = webview.getTitle() || tab.title;
+    recordRecentDomainVisit(tab.url, tab.title);
     syncAddressBar();
     updateBrowserContext();
     persistSession();
@@ -463,7 +678,10 @@ function hydrateSettingsForm() {
   elements.apiKeyInput.value = state.settings.apiKey;
   elements.temperatureInput.value = String(state.settings.temperature);
   elements.iterationsInput.value = String(state.settings.maxIterations);
-  populateModelOptions([{ name: state.settings.model }], state.settings.model);
+  elements.trustedOriginsInput.value = state.settings.trustedOrigins || "";
+  state.modelCatalog = normalizeModelCatalog([{ name: state.settings.model }], state.settings.model);
+  populateModelOptions(state.modelCatalog, state.settings.model);
+  updatePolicyGuidance(elements.trustedOriginsInput.value);
 }
 
 function readSettingsForm() {
@@ -474,6 +692,7 @@ function readSettingsForm() {
     model: elements.modelSelect.value || state.settings.model || DEFAULT_SETTINGS.model,
     temperature: clampNumber(elements.temperatureInput.value, 0, 2, DEFAULT_SETTINGS.temperature),
     maxIterations: clampInteger(elements.iterationsInput.value, 2, 30, DEFAULT_SETTINGS.maxIterations),
+    trustedOrigins: normalizeTrustedOriginsInput(elements.trustedOriginsInput.value),
     requestTimeoutMs: DEFAULT_SETTINGS.requestTimeoutMs,
     keepAlive: DEFAULT_SETTINGS.keepAlive
   };
@@ -527,8 +746,54 @@ function loadConversation() {
   }
 }
 
+function loadAgentMemory() {
+  try {
+    const raw = localStorage.getItem(AGENT_MEMORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return normalizeAgentMemory(parsed);
+  } catch {
+    return createEmptyAgentMemory();
+  }
+}
+
+function createEmptyAgentMemory() {
+  return {
+    version: 1,
+    activeGoal: null,
+    userPreferences: {
+      assistant: {}
+    },
+    recentDomains: [],
+    workflows: [],
+    checkpoints: []
+  };
+}
+
+function normalizeAgentMemory(parsed) {
+  const memory = createEmptyAgentMemory();
+  if (!parsed || typeof parsed !== "object") {
+    return memory;
+  }
+
+  memory.activeGoal = parsed.activeGoal && typeof parsed.activeGoal === "object" ? parsed.activeGoal : null;
+  memory.userPreferences = parsed.userPreferences && typeof parsed.userPreferences === "object"
+    ? {
+      assistant: parsed.userPreferences.assistant && typeof parsed.userPreferences.assistant === "object"
+        ? parsed.userPreferences.assistant
+        : {}
+    }
+    : memory.userPreferences;
+  memory.recentDomains = Array.isArray(parsed.recentDomains) ? parsed.recentDomains.slice(0, MAX_MEMORY_DOMAINS) : [];
+  memory.workflows = Array.isArray(parsed.workflows) ? parsed.workflows.slice(0, MAX_MEMORY_WORKFLOWS) : [];
+  memory.checkpoints = Array.isArray(parsed.checkpoints) ? parsed.checkpoints.slice(0, MAX_MEMORY_CHECKPOINTS) : [];
+  return memory;
+}
+
 function persistSettings() {
   localStorage.setItem("desktopSettings", JSON.stringify(state.settings));
+  syncMemoryPreferencesFromSettings();
+  persistAgentMemory();
+  updatePolicyGuidance(state.settings.trustedOrigins);
 }
 
 function persistConversation() {
@@ -613,6 +878,121 @@ function persistPreferences() {
   localStorage.setItem("desktopPreferences", JSON.stringify(state.preferences));
 }
 
+function persistAgentMemory() {
+  localStorage.setItem(AGENT_MEMORY_KEY, JSON.stringify(state.memory));
+}
+
+function loadTelemetry() {
+  try {
+    const raw = localStorage.getItem(TELEMETRY_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return normalizeTelemetry(parsed);
+  } catch {
+    return createEmptyTelemetry();
+  }
+}
+
+function createEmptyTelemetry() {
+  return {
+    version: 1,
+    summary: {
+      taskRuns: 0,
+      taskSuccesses: 0,
+      taskBlocked: 0,
+      stepAttempts: 0,
+      stepSuccesses: 0,
+      approvalsRequested: 0,
+      approvalsGranted: 0,
+      approvalsDenied: 0,
+      recoveryAttempts: 0,
+      recoverySuccesses: 0,
+      toolCalls: 0
+    },
+    failureCategories: {},
+    recentEvents: [],
+    lastFailure: "",
+    activeRun: null
+  };
+}
+
+function normalizeTelemetry(parsed) {
+  const telemetry = createEmptyTelemetry();
+  if (!parsed || typeof parsed !== "object") {
+    return telemetry;
+  }
+
+  telemetry.summary = {
+    ...telemetry.summary,
+    ...(parsed.summary && typeof parsed.summary === "object" ? parsed.summary : {})
+  };
+  telemetry.failureCategories = parsed.failureCategories && typeof parsed.failureCategories === "object"
+    ? parsed.failureCategories
+    : {};
+  telemetry.recentEvents = Array.isArray(parsed.recentEvents) ? parsed.recentEvents.slice(0, TELEMETRY_EVENT_LIMIT) : [];
+  telemetry.lastFailure = typeof parsed.lastFailure === "string" ? parsed.lastFailure : "";
+  telemetry.activeRun = parsed.activeRun && typeof parsed.activeRun === "object" ? parsed.activeRun : null;
+  return telemetry;
+}
+
+function persistTelemetry() {
+  localStorage.setItem(TELEMETRY_KEY, JSON.stringify(state.telemetry));
+}
+
+function syncMemoryPreferencesFromSettings() {
+  state.memory.userPreferences.assistant = {
+    preferredModel: state.settings.model,
+    preferredModelCapability: modelSupportsVision(state.settings.model) ? "vision" : "not-preferred",
+    approvalMode: state.settings.approvalMode || DEFAULT_SETTINGS.approvalMode,
+    temperature: state.settings.temperature,
+    maxIterations: state.settings.maxIterations,
+    trustedOrigins: parseTrustedOrigins(state.settings.trustedOrigins),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function announceResumableMemory() {
+  const activeGoal = state.memory.activeGoal;
+  if (!activeGoal || !["running", "blocked"].includes(activeGoal.status)) {
+    return;
+  }
+
+  const checkpoint = state.memory.checkpoints.find((entry) => entry.taskId === activeGoal.taskId) || null;
+  const stepCopy = checkpoint?.currentStepObjective || activeGoal.currentStepObjective || "the next step";
+  state.lastResult = `Resumable task available: ${truncate(activeGoal.task || "Previous task", 120)}. Last checkpoint: ${truncate(stepCopy, 120)}.`;
+  pushLog("info", `Resumable checkpoint restored for "${truncate(activeGoal.task || "previous task", 100)}".`);
+}
+
+function recordRecentDomainVisit(url, title) {
+  const domain = extractMemoryDomain(url);
+  if (!domain) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const existing = state.memory.recentDomains.find((entry) => entry.domain === domain);
+  if (existing) {
+    existing.visits = (existing.visits || 0) + 1;
+    existing.lastVisitedAt = now;
+    existing.titleHint = truncate(title || existing.titleHint || "", 80);
+  } else {
+    state.memory.recentDomains.unshift({
+      domain,
+      visits: 1,
+      lastVisitedAt: now,
+      titleHint: truncate(title || "", 80)
+    });
+  }
+
+  state.memory.recentDomains.sort((left, right) => {
+    if ((right.lastVisitedAt || "") !== (left.lastVisitedAt || "")) {
+      return String(right.lastVisitedAt || "").localeCompare(String(left.lastVisitedAt || ""));
+    }
+    return (right.visits || 0) - (left.visits || 0);
+  });
+  state.memory.recentDomains = state.memory.recentDomains.slice(0, MAX_MEMORY_DOMAINS);
+  persistAgentMemory();
+}
+
 function applyLayoutState() {
   elements.windowShell.classList.toggle("agent-collapsed", state.preferences.agentPaneOpen === false);
   elements.toggleAgentButton.textContent = state.preferences.agentPaneOpen ? "Hide assistant" : "Show assistant";
@@ -647,12 +1027,18 @@ async function refreshModels({ silent }) {
 
   try {
     const models = await window.desktopBridge.listModels(state.settings);
-    populateModelOptions(models, state.settings.model);
+    state.modelCatalog = normalizeModelCatalog(models, state.settings.model);
+    populateModelOptions(state.modelCatalog, state.settings.model);
     if (!silent) {
-      setFeedback(`Found ${models.length} local model${models.length === 1 ? "" : "s"}.`, "success");
+      const recommendation = recommendModel(state.modelCatalog);
+      const suffix = recommendation
+        ? ` Recommended: ${recommendation.name} (${recommendation.capabilityLabel.toLowerCase()}).`
+        : " No vision model detected yet.";
+      setFeedback(`Found ${models.length} local model${models.length === 1 ? "" : "s"}.${suffix}`, "success");
     }
   } catch (error) {
-    populateModelOptions([{ name: state.settings.model }], state.settings.model);
+    state.modelCatalog = normalizeModelCatalog([{ name: state.settings.model }], state.settings.model);
+    populateModelOptions(state.modelCatalog, state.settings.model);
     if (!silent) {
       setFeedback(error.message, "error");
     }
@@ -665,27 +1051,128 @@ async function testConnection() {
   setFeedback("Checking Ollama connection...", "");
   try {
     const result = await window.desktopBridge.testConnection(state.settings);
-    setFeedback(`Connection ok. ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} available.`, "success");
+    state.modelCatalog = normalizeModelCatalog(result.models, state.settings.model);
+    populateModelOptions(state.modelCatalog, state.settings.model);
+    const recommendation = recommendModel(state.modelCatalog);
+    const suffix = recommendation
+      ? ` Recommended: ${recommendation.name} (${recommendation.capabilityLabel.toLowerCase()}).`
+      : " No vision model detected yet.";
+    setFeedback(`Connection ok. ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} available.${suffix}`, "success");
   } catch (error) {
     setFeedback(error.message, "error");
   }
 }
 
 function populateModelOptions(models, selectedModel) {
-  const entries = Array.isArray(models) ? models : [];
-  const names = entries.map((model) => typeof model === "string" ? model : model.name).filter(Boolean);
+  const entries = normalizeModelCatalog(models, selectedModel);
+  state.modelCatalog = entries;
+
+  elements.modelSelect.textContent = "";
+  for (const entry of entries) {
+    const option = document.createElement("option");
+    option.value = entry.name;
+    option.textContent = `${entry.name} (${entry.capabilityLabel})`;
+    option.selected = entry.name === selectedModel;
+    elements.modelSelect.append(option);
+  }
+
+  updateModelGuidance(entries, selectedModel || entries[0]?.name || "");
+}
+
+function normalizeModelCatalog(models, selectedModel) {
+  const rawEntries = Array.isArray(models) ? models : [];
+  const names = rawEntries.map((model) => typeof model === "string" ? model : model.name).filter(Boolean);
   if (selectedModel && !names.includes(selectedModel)) {
     names.unshift(selectedModel);
   }
 
-  elements.modelSelect.textContent = "";
-  for (const name of names) {
-    const option = document.createElement("option");
-    option.value = name;
-    option.textContent = name;
-    option.selected = name === selectedModel;
-    elements.modelSelect.append(option);
+  return names
+    .map((name) => {
+      const capability = modelSupportsVision(name) ? "vision" : "not-preferred";
+      return {
+        name,
+        capability,
+        capabilityLabel: capability === "vision" ? "Vision" : "Not preferred",
+        recommendationScore: getModelRecommendationScore(name, capability)
+      };
+    })
+    .sort((left, right) => {
+      if (right.recommendationScore !== left.recommendationScore) {
+        return right.recommendationScore - left.recommendationScore;
+      }
+      return left.name.localeCompare(right.name);
+    });
+}
+
+function updateModelGuidance(entries, selectedModel) {
+  const catalog = Array.isArray(entries) ? entries : [];
+  const selectedEntry = catalog.find((entry) => entry.name === selectedModel) || catalog[0] || null;
+  const recommendation = recommendModel(catalog);
+
+  if (!selectedEntry) {
+    elements.modelGuidance.textContent = "Refresh models to detect whether a vision-capable model is available.";
+    elements.modelGuidance.className = "model-guidance not-preferred";
+    return;
   }
+
+  if (selectedEntry.capability === "vision") {
+    const suffix = recommendation && recommendation.name !== selectedEntry.name
+      ? ` Another strong option is ${recommendation.name}.`
+      : " This model can use screenshot grounding directly.";
+    elements.modelGuidance.textContent = `${selectedEntry.name} is a vision model and is preferred for this browser.${suffix}`;
+    elements.modelGuidance.className = "model-guidance vision";
+    return;
+  }
+
+  if (recommendation) {
+    elements.modelGuidance.textContent = `${selectedEntry.name} is not preferred because it cannot use screenshot grounding directly. Recommended: ${recommendation.name} (Vision).`;
+    elements.modelGuidance.className = "model-guidance not-preferred";
+    return;
+  }
+
+  elements.modelGuidance.textContent = `${selectedEntry.name} is not preferred for browser perception. Install or pull a vision-capable Ollama model for screenshot grounding.`;
+  elements.modelGuidance.className = "model-guidance not-preferred";
+}
+
+function recommendModel(entries) {
+  const catalog = Array.isArray(entries) ? entries : [];
+  return catalog.find((entry) => entry.capability === "vision") || null;
+}
+
+function getModelRecommendationScore(name, capability) {
+  if (capability !== "vision") {
+    return 0;
+  }
+
+  const normalized = String(name || "").toLowerCase();
+  if (normalized.includes("qwen2.5-vl")) {
+    return 120;
+  }
+  if (normalized.includes("qwen2-vl")) {
+    return 115;
+  }
+  if (normalized.includes("gemma3")) {
+    return 110;
+  }
+  if (normalized.includes("pixtral")) {
+    return 108;
+  }
+  if (normalized.includes("llava")) {
+    return 105;
+  }
+  if (normalized.includes("internvl") || normalized.includes("cogvlm") || normalized.includes("llama3.2-vision")) {
+    return 102;
+  }
+  if (normalized.includes("bakllava")) {
+    return 100;
+  }
+  if (normalized.includes("moondream")) {
+    return 95;
+  }
+  if (normalized.includes("vision")) {
+    return 90;
+  }
+  return 80;
 }
 
 function setFeedback(message, tone) {
@@ -799,24 +1286,161 @@ async function runAgentTask(taskValue) {
   renderState();
 
   pushLog("info", `Queued message: ${task}`);
-
-  const messages = buildConversationMessages();
+  const taskId = beginGoalMemory(task);
+  recordTaskTelemetryStart(taskId, task);
+  const budget = {
+    used: 0,
+    total: state.settings.maxIterations
+  };
 
   try {
-    for (let step = 1; step <= state.settings.maxIterations; step += 1) {
-      ensureNotCancelled();
-      state.currentStep = { step, total: state.settings.maxIterations, label: "thinking" };
-      renderState();
-      pushLog("info", `Agent step ${step}/${state.settings.maxIterations}`);
+    const initialObservation = await observeCurrentPage({
+      includeText: true,
+      includeMetadata: true,
+      includeScreenshot: false,
+      includeOcr: false,
+      includeDiff: true
+    });
 
-      const response = await window.desktopBridge.chatWithOllama({
-        settings: state.settings,
-        messages,
-        tools: TOOL_DEFINITIONS
+    const plan = await createExecutionPlan({
+      task,
+      initialObservation,
+      budget
+    });
+
+    applyPlanToGoalMemory(taskId, plan, initialObservation);
+    updateTaskTelemetryPlan(taskId, plan);
+
+    pushLog("reasoning", `Plan ready: ${formatExecutionPlan(plan)}`);
+
+    const completedSteps = [];
+    for (let index = 0; index < plan.steps.length; index += 1) {
+      ensureNotCancelled();
+      const step = plan.steps[index];
+      const outcome = await executePlannedStep({
+        task,
+        taskId,
+        plan,
+        step,
+        stepIndex: index,
+        completedSteps,
+        budget
       });
 
-      const assistantMessage = normalizeAssistantMessage(response.message);
-      messages.push(assistantMessage);
+      completedSteps.push(outcome);
+      updateGoalMemoryFromOutcome(taskId, plan, completedSteps);
+
+      if (outcome.verification?.verdict !== "complete") {
+        break;
+      }
+    }
+
+    const finalAnswer = await finalizeTaskRun({
+      task,
+      plan,
+      completedSteps,
+      budget
+    });
+
+    const runStatus = completedSteps.some((entry) => entry.verification?.verdict !== "complete") ? "blocked" : "completed";
+    completeGoalMemory(taskId, plan, completedSteps, runStatus, finalAnswer);
+    recordTaskTelemetryFinish(taskId, runStatus, completedSteps, runStatus === "completed" ? "" : finalAnswer);
+    state.lastResult = finalAnswer;
+    appendConversation("assistant", finalAnswer);
+    pushLog("success", finalAnswer);
+    renderState();
+  } catch (error) {
+    failGoalMemory(taskId, error);
+    recordTaskTelemetryFinish(taskId, "blocked", [], error.message);
+    state.lastResult = error.message;
+    appendConversation("assistant", `I ran into an error while working on that: ${error.message}`);
+    pushLog("error", error.message);
+  } finally {
+    state.running = false;
+    state.abortRequested = false;
+    state.currentStep = null;
+    renderState();
+  }
+}
+
+async function createExecutionPlan({ task, initialObservation, budget }) {
+  const memoryContext = buildRelevantMemoryContext(task);
+  const workflowContext = buildWorkflowContext(task, initialObservation?.page, memoryContext);
+  const plannerMessages = [
+    { role: "system", content: PLANNER_SYSTEM_PROMPT },
+    ...buildConversationHistoryMessages(),
+    {
+      role: "user",
+      content: [
+        `User request: ${task}`,
+        "",
+        "Relevant memory:",
+        formatMemoryContext(memoryContext),
+        "",
+        "Workflow library:",
+        formatWorkflowContext(workflowContext),
+        "",
+        "Current page observation:",
+        formatObservationForPrompt(initialObservation.page, { includeVisibleText: true }),
+        "",
+        "Return JSON only."
+      ].join("\n")
+    }
+  ];
+
+  const assistantMessage = await requestModelTurn({
+    label: "planner",
+    messages: plannerMessages,
+    tools: [],
+    budget
+  });
+
+  const parsedPlan = parseJsonResponse(assistantMessage.content);
+  return normalizeExecutionPlan(parsedPlan, task, workflowContext);
+}
+
+async function executePlannedStep({ task, taskId, plan, step, stepIndex, completedSteps, budget }) {
+  let verifierFeedback = "";
+  let latestObservation = null;
+  const recentToolSummaries = [];
+  let lastToolExecution = null;
+
+  for (let attempt = 1; attempt <= MAX_STEP_RETRIES; attempt += 1) {
+    ensureNotCancelled();
+    pushLog("info", `Executing step ${stepIndex + 1}/${plan.steps.length}: ${step.objective}`);
+    recordStepTelemetryAttempt(taskId, step, attempt);
+
+    const executorMessages = [
+      { role: "system", content: EXECUTOR_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: buildExecutorPrompt({
+          task,
+          taskId,
+          plan,
+          step,
+          stepIndex,
+          completedSteps,
+          verifierFeedback,
+          latestObservation
+        })
+      }
+    ];
+
+    let executorSummary = "";
+    recentToolSummaries.length = 0;
+    lastToolExecution = null;
+
+    for (let turn = 1; turn <= MAX_EXECUTOR_TURNS_PER_ATTEMPT; turn += 1) {
+      ensureNotCancelled();
+      const assistantMessage = await requestModelTurn({
+        label: `execute ${stepIndex + 1}.${turn}`,
+        messages: executorMessages,
+        tools: TOOL_DEFINITIONS,
+        budget
+      });
+
+      executorMessages.push(assistantMessage);
 
       const reasoningSummary = buildReasoningSummary(assistantMessage);
       if (reasoningSummary) {
@@ -829,69 +1453,301 @@ async function runAgentTask(taskValue) {
 
       const toolCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
       if (!toolCalls.length) {
-        if (!assistantMessage.content) {
-          throw new Error("The model returned neither content nor tool calls.");
-        }
-
-        state.running = false;
-        state.currentStep = null;
-        state.lastResult = assistantMessage.content;
-        appendConversation("assistant", assistantMessage.content);
-        pushLog("success", assistantMessage.content);
-        renderState();
-        return;
+        executorSummary = assistantMessage.content || `Completed step: ${step.objective}`;
+        break;
       }
 
       for (const toolCall of toolCalls) {
-        ensureNotCancelled();
-        const name = toolCall?.function?.name;
-        const args = normalizeArguments(toolCall?.function?.arguments);
-        if (!name) {
-          continue;
-        }
-
-        if (state.settings.approvalMode === "manual" && MUTATING_TOOLS.has(name)) {
-          const approved = window.confirm(`Approve browser action?\n\n${describeToolUse(name, args)}`);
-          if (!approved) {
-            const deniedResult = { ok: false, error: "Action denied by user." };
-            messages.push({ role: "tool", tool_name: name, content: JSON.stringify(deniedResult) });
-            pushLog("warn", `Denied ${name}.`);
-            continue;
-          }
-        }
-
-        state.currentStep = { step, total: state.settings.maxIterations, label: name };
-        renderState();
-        pushLog("tool", `Tool: ${name}`);
-
-        let result;
-        try {
-          result = await executeTool(name, args);
-        } catch (error) {
-          result = { ok: false, error: error.message };
-        }
-
-        messages.push({
-          role: "tool",
-          tool_name: name,
-          content: JSON.stringify(result)
+        const toolResult = await executeToolCallFromModel({
+          toolCall,
+          stepIndex,
+          taskId,
+          budget
         });
 
-        pushLog(result.ok === false ? "error" : "tool", summarizeToolResult(name, result));
+        lastToolExecution = toolResult;
+        recentToolSummaries.push(summarizeToolResult(toolCall?.function?.name || "tool", toolResult.transcriptResult));
+        executorMessages.push({
+          role: "tool",
+          tool_name: toolResult.name,
+          content: JSON.stringify(toolResult.transcriptResult)
+        });
+
+        if (toolResult.visualGroundingMessage) {
+          executorMessages.push(toolResult.visualGroundingMessage);
+        }
       }
     }
 
-    throw new Error(`Stopped after ${state.settings.maxIterations} steps without a final answer.`);
-  } catch (error) {
-    state.lastResult = error.message;
-    appendConversation("assistant", `I ran into an error while working on that: ${error.message}`);
-    pushLog("error", error.message);
-  } finally {
-    state.running = false;
-    state.abortRequested = false;
-    state.currentStep = null;
-    renderState();
+    latestObservation = await observeCurrentPage({
+      includeText: false,
+      includeMetadata: true,
+      includeScreenshot: false,
+      includeOcr: false,
+      includeDiff: true
+    });
+
+    const verification = await verifyExecutionStep({
+      task,
+      plan,
+      step,
+      stepIndex,
+      completedSteps,
+      executorSummary,
+      recentToolSummaries,
+      observation: latestObservation,
+      budget
+    });
+
+    if (verification.verdict === "complete") {
+      recordStepTelemetryVerification(taskId, step, verification, "complete");
+      pushLog("success", `Verified step ${stepIndex + 1}: ${verification.reason}`);
+      return {
+        stepId: step.id,
+        objective: step.objective,
+        successCriteria: step.successCriteria,
+        executorSummary,
+        verification,
+        attemptCount: attempt,
+        observationSummary: latestObservation?.pageStateDiff?.summary || ""
+      };
+    }
+
+    const failureCategory = categorizeExecutionFailure({
+      verification,
+      lastToolExecution,
+      observation: latestObservation
+    });
+    recordStepTelemetryVerification(taskId, step, verification, failureCategory);
+
+    const recovery = await attemptAutomaticRecovery({
+      taskId,
+      step,
+      verification,
+      failureCategory,
+      lastToolExecution,
+      observation: latestObservation,
+      budget
+    });
+
+    if (recovery.blocked) {
+      pushLog("warn", `Step ${stepIndex + 1} blocked: ${recovery.note}`);
+      return {
+        stepId: step.id,
+        objective: step.objective,
+        successCriteria: step.successCriteria,
+        executorSummary,
+        verification: {
+          verdict: "blocked",
+          reason: recovery.note,
+          evidence: verification.evidence || "",
+          nextActionHint: recovery.nextActionHint || verification.nextActionHint || ""
+        },
+        attemptCount: attempt,
+        observationSummary: latestObservation?.pageStateDiff?.summary || ""
+      };
+    }
+
+    if (verification.verdict === "blocked") {
+      pushLog("warn", `Step ${stepIndex + 1} blocked: ${verification.reason}`);
+      return {
+        stepId: step.id,
+        objective: step.objective,
+        successCriteria: step.successCriteria,
+        executorSummary,
+        verification,
+        attemptCount: attempt,
+        observationSummary: latestObservation?.pageStateDiff?.summary || ""
+      };
+    }
+
+    verifierFeedback = [
+      `Verifier reason: ${verification.reason}`,
+      verification.evidence ? `Evidence: ${verification.evidence}` : "",
+      verification.nextActionHint ? `Next action hint: ${verification.nextActionHint}` : "",
+      recovery.note ? `Recovery note: ${recovery.note}` : ""
+    ].filter(Boolean).join("\n");
+    pushLog("warn", `Retrying step ${stepIndex + 1}: ${verification.reason}`);
   }
+
+  return {
+    stepId: step.id,
+    objective: step.objective,
+    successCriteria: step.successCriteria,
+    executorSummary: "The step did not verify successfully within the retry limit.",
+    verification: {
+      verdict: "blocked",
+      reason: "The step could not be verified after multiple attempts.",
+      evidence: "",
+      nextActionHint: "Re-inspect the page and revise the plan."
+    },
+    attemptCount: MAX_STEP_RETRIES
+  };
+}
+
+async function verifyExecutionStep({ task, plan, step, stepIndex, completedSteps, executorSummary, recentToolSummaries, observation, budget }) {
+  const verifierMessages = [
+    { role: "system", content: VERIFIER_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        `User request: ${task}`,
+        `Plan summary: ${plan.summary}`,
+        `Current step (${stepIndex + 1}/${plan.steps.length}): ${step.objective}`,
+        `Success criteria: ${step.successCriteria}`,
+        completedSteps.length
+          ? `Completed steps so far: ${completedSteps.map((entry) => entry.objective).join(" | ")}`
+          : "Completed steps so far: none",
+        `Executor summary: ${executorSummary || "No executor summary provided."}`,
+        recentToolSummaries.length
+          ? `Recent tool results:\n- ${recentToolSummaries.join("\n- ")}`
+          : "Recent tool results: none",
+        "Latest page observation:",
+        formatObservationForPrompt(observation.page, { includeVisibleText: false }),
+        observation.pageStateDiff?.summary ? `Latest page diff: ${observation.pageStateDiff.summary}` : "",
+        "",
+        "Return JSON only."
+      ].filter(Boolean).join("\n")
+    }
+  ];
+
+  const assistantMessage = await requestModelTurn({
+    label: `verify ${stepIndex + 1}`,
+    messages: verifierMessages,
+    tools: [],
+    budget
+  });
+
+  return normalizeVerificationResult(parseJsonResponse(assistantMessage.content), observation);
+}
+
+async function finalizeTaskRun({ task, plan, completedSteps, budget }) {
+  const memoryContext = buildRelevantMemoryContext(task);
+  const blockedStep = completedSteps.find((entry) => entry.verification?.verdict !== "complete") || null;
+  const finalizerMessages = [
+    { role: "system", content: FINALIZER_SYSTEM_PROMPT },
+    ...buildConversationHistoryMessages(),
+    {
+      role: "user",
+      content: [
+        `Original user request: ${task}`,
+        "Relevant memory:",
+        formatMemoryContext(memoryContext),
+        `Plan summary: ${plan.summary}`,
+        "Execution results:",
+        completedSteps.map((entry, index) => formatStepOutcome(entry, index)).join("\n"),
+        blockedStep
+          ? `The run stopped early because step "${blockedStep.objective}" was ${blockedStep.verification.verdict}.`
+          : "All planned steps were verified.",
+        "",
+        "Write the final assistant reply for the user."
+      ].join("\n")
+    }
+  ];
+
+  try {
+    const assistantMessage = await requestModelTurn({
+      label: "finalize",
+      messages: finalizerMessages,
+      tools: [],
+      budget
+    });
+    return assistantMessage.content || buildLocalFinalSummary(task, completedSteps);
+  } catch {
+    return buildLocalFinalSummary(task, completedSteps);
+  }
+}
+
+async function executeToolCallFromModel({ toolCall, stepIndex, taskId, budget }) {
+  ensureNotCancelled();
+  const name = toolCall?.function?.name;
+  const args = normalizeArguments(toolCall?.function?.arguments);
+  if (!name) {
+    return {
+      name: "unknown_tool",
+      transcriptResult: { ok: false, error: "Tool call missing function name." },
+      visualGroundingMessage: null
+    };
+  }
+
+  const policyDecision = await evaluateSafetyPolicy(name, args);
+  if (policyDecision.blocked) {
+    const blockedResult = { ok: false, error: policyDecision.reason, failureCategory: "policy_blocked" };
+    state.telemetry.failureCategories.policy_blocked = (state.telemetry.failureCategories.policy_blocked || 0) + 1;
+    state.telemetry.lastFailure = truncate(policyDecision.reason, 180);
+    pushTelemetryEvent("policy", policyDecision.reason);
+    persistTelemetry();
+    pushLog("warn", policyDecision.reason);
+    return {
+      name,
+      transcriptResult: blockedResult,
+      visualGroundingMessage: null,
+      policyDecision
+    };
+  }
+
+  if (policyDecision.requiresApproval || (state.settings.approvalMode === "manual" && MUTATING_TOOLS.has(name))) {
+    recordApprovalTelemetry(null, policyDecision.reason || `Approval requested for ${name}.`);
+    const approved = window.confirm(`Approve browser action?\n\n${policyDecision.reason || describeToolUse(name, args)}`);
+    if (!approved) {
+      const deniedResult = { ok: false, error: "Action denied by user.", failureCategory: "approval_denied" };
+      recordApprovalTelemetry(false, policyDecision.reason || `Denied ${name}.`);
+      pushLog("warn", `Denied ${name}.`);
+      return {
+        name,
+        transcriptResult: deniedResult,
+        visualGroundingMessage: null,
+        policyDecision
+      };
+    }
+    recordApprovalTelemetry(true, policyDecision.reason || `Approved ${name}.`);
+  }
+
+  state.currentStep = {
+    step: budget.used,
+    total: budget.total,
+    label: `${name} (step ${stepIndex + 1})`
+  };
+  renderState();
+  pushLog("tool", `Tool: ${name}`);
+
+  let result;
+  try {
+    result = await executeTool(name, args);
+  } catch (error) {
+    result = { ok: false, error: error.message };
+  }
+
+  const transcriptResult = serializeToolResult(result);
+  recordToolTelemetry(name, transcriptResult);
+  pushLog(transcriptResult.ok === false ? "error" : "tool", summarizeToolResult(name, transcriptResult));
+
+  return {
+    name,
+    transcriptResult,
+    visualGroundingMessage: buildVisualGroundingMessage(state.settings.model, name, result),
+    policyDecision
+  };
+}
+
+async function requestModelTurn({ label, messages, tools, budget }) {
+  ensureNotCancelled();
+  if (budget.used >= budget.total) {
+    throw new Error(`Stopped after ${budget.total} model turns without finishing the task.`);
+  }
+
+  budget.used += 1;
+  state.currentStep = { step: budget.used, total: budget.total, label };
+  renderState();
+  pushLog("info", `Model turn ${budget.used}/${budget.total}: ${label}`);
+
+  const response = await window.desktopBridge.chatWithOllama({
+    settings: state.settings,
+    messages,
+    tools: Array.isArray(tools) ? tools : []
+  });
+
+  return normalizeAssistantMessage(response.message);
 }
 
 async function executeTool(name, args) {
@@ -910,37 +1766,37 @@ async function executeTool(name, args) {
         summary: `Found ${state.tabs.length} tab${state.tabs.length === 1 ? "" : "s"} in this browser.`
       };
     case "switch_to_tab":
-      return switchToTab(args);
+      return withPageStateDiff("switch_to_tab", await switchToTab(args));
     case "open_new_tab":
-      return openNewTab(args);
+      return withPageStateDiff("open_new_tab", await openNewTab(args));
     case "open_or_search":
-      return openOrSearch(args);
+      return withPageStateDiff("open_or_search", await openOrSearch(args));
     case "navigate_to":
-      return navigateTo(args);
+      return withPageStateDiff("navigate_to", await navigateTo(args));
     case "reload_tab":
       await reloadActiveTab();
-      return { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Reloaded ${getActiveTab()?.title || "the current tab"}.` };
+      return withPageStateDiff("reload_tab", { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Reloaded ${getActiveTab()?.title || "the current tab"}.` });
     case "go_back":
       await goBack();
-      return { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Moved back in ${getActiveTab()?.title || "the current tab"}.` };
+      return withPageStateDiff("go_back", { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Moved back in ${getActiveTab()?.title || "the current tab"}.` });
     case "go_forward":
       await goForward();
-      return { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Moved forward in ${getActiveTab()?.title || "the current tab"}.` };
+      return withPageStateDiff("go_forward", { ok: true, currentTabId: getActiveTab()?.id || null, summary: `Moved forward in ${getActiveTab()?.title || "the current tab"}.` });
     case "close_current_tab":
-      return closeCurrentTab();
+      return withPageStateDiff("close_current_tab", await closeCurrentTab());
     case "inspect_page":
       return inspectPage(args);
     case "click_element":
-      return runPageCommand("clickElement", { elementId: args.elementId });
+      return withPageStateDiff("click_element", await runPageCommand("clickElement", { elementId: args.elementId }));
     case "type_into_element":
-      return runPageCommand("typeIntoElement", {
+      return withPageStateDiff("type_into_element", await runPageCommand("typeIntoElement", {
         elementId: args.elementId,
         text: String(args.text || ""),
         clearFirst: args.clearFirst !== false,
         submit: args.submit === true
-      });
+      }));
     case "hover_element":
-      return runPageCommand("hoverElement", { elementId: args.elementId });
+      return withPageStateDiff("hover_element", await runPageCommand("hoverElement", { elementId: args.elementId }));
     case "move_mouse_to_element":
       return runPageCommand("moveMouseToElement", { elementId: args.elementId });
     case "move_mouse_to_coordinates":
@@ -950,10 +1806,10 @@ async function executeTool(name, args) {
         label: args.label || ""
       });
     case "scroll_page":
-      return runPageCommand("scrollPage", {
+      return withPageStateDiff("scroll_page", await runPageCommand("scrollPage", {
         direction: args.direction === "up" ? "up" : "down",
         amount: normalizeAmount(args.amount)
-      });
+      }));
     case "read_element_text":
       return runPageCommand("readElementText", { elementId: args.elementId });
     case "wait":
@@ -1050,15 +1906,79 @@ function closeCurrentTab() {
 }
 
 async function inspectPage(args) {
-  const result = await runPageCommand("snapshot", {
+  const observation = await observeCurrentPage({
     includeText: args.includeText !== false,
-    includeMetadata: args.includeMetadata !== false
+    includeMetadata: args.includeMetadata !== false,
+    includeScreenshot: args.includeScreenshot !== false,
+    includeOcr: args.includeOcr !== false,
+    includeDiff: args.includeDiff !== false
   });
+
+  const page = observation.page;
   return {
     ok: true,
     currentTabId: getActiveTab()?.id || null,
-    page: result,
-    summary: `Inspected ${getActiveTab()?.title || getActiveTab()?.url || "page"}. Found ${result.interactiveElements?.length || 0} interactive elements.`
+    page,
+    pageStateDiff: observation.pageStateDiff,
+    visualContext: observation.visualContext,
+    summary: `Inspected ${getActiveTab()?.title || getActiveTab()?.url || "page"}. Found ${page.interactiveElements?.length || 0} ranked interactive elements, ${page.landmarks?.length || 0} landmarks, and ${page.forms?.length || 0} forms.`
+  };
+}
+
+async function withPageStateDiff(toolName, result) {
+  if (result?.ok === false || !TOOLS_WITH_PAGE_STATE_DIFF.has(toolName)) {
+    return result;
+  }
+
+  const observation = await observeCurrentPage({
+    includeText: false,
+    includeMetadata: true,
+    includeScreenshot: false,
+    includeOcr: false,
+    includeDiff: true
+  });
+
+  return {
+    ...result,
+    pageState: buildCompactPageState(observation.page),
+    pageStateDiff: observation.pageStateDiff,
+    summary: mergeSummaries(result.summary, observation.pageStateDiff?.summary)
+  };
+}
+
+async function observeCurrentPage(options = {}) {
+  const tab = getActiveTab();
+  if (!tab?.webview) {
+    throw new Error("No active browser tab is available.");
+  }
+
+  const page = await runPageCommand("snapshot", {
+    includeText: options.includeText !== false,
+    includeMetadata: options.includeMetadata !== false
+  });
+
+  let visualContext = null;
+  if (options.includeScreenshot !== false) {
+    visualContext = await buildVisualGrounding(tab, {
+      includeOcr: options.includeOcr !== false
+    });
+    if (visualContext) {
+      page.visualGrounding = {
+        screenshot: visualContext.screenshot,
+        ocr: visualContext.ocr,
+        summary: visualContext.summary
+      };
+    }
+  }
+
+  const previousPage = tab.lastObservedPage;
+  const pageStateDiff = options.includeDiff === false ? null : buildPageStateDiff(previousPage, page);
+  tab.lastObservedPage = cloneObservedPage(page);
+
+  return {
+    page,
+    pageStateDiff,
+    visualContext
   };
 }
 
@@ -1079,6 +1999,197 @@ async function runPageCommand(type, payload) {
     currentTabId: tab.id,
     ...result
   };
+}
+
+async function buildVisualGrounding(tab, { includeOcr }) {
+  const screenshot = await captureScreenshot(tab);
+  if (!screenshot) {
+    return null;
+  }
+
+  let ocr = null;
+  if (includeOcr) {
+    try {
+      ocr = await window.desktopBridge.ocrScreenshot({
+        imageBase64: screenshot.imageBase64,
+        maxCharacters: 2200
+      });
+    } catch (error) {
+      ocr = {
+        ok: false,
+        error: error.message
+      };
+    }
+  }
+
+  return {
+    imageBase64: screenshot.imageBase64,
+    screenshot: {
+      width: screenshot.width,
+      height: screenshot.height,
+      byteLength: screenshot.byteLength,
+      fingerprint: screenshot.fingerprint
+    },
+    ocr,
+    summary: ocr?.ok
+      ? `Captured a ${screenshot.width}x${screenshot.height} screenshot and extracted ${ocr.wordCount} OCR words.`
+      : `Captured a ${screenshot.width}x${screenshot.height} screenshot for visual grounding.`
+  };
+}
+
+async function captureScreenshot(tab) {
+  await waitForDomReady(tab.webview);
+  const image = await tab.webview.capturePage();
+  const resized = image.resize({
+    width: Math.min(1280, image.getSize().width || 1280)
+  });
+  const pngBuffer = resized.toPNG();
+  const size = resized.getSize();
+
+  return {
+    width: size.width,
+    height: size.height,
+    byteLength: pngBuffer.byteLength,
+    fingerprint: hashString(pngBuffer.toString("base64").slice(0, 4096)),
+    imageBase64: pngBuffer.toString("base64")
+  };
+}
+
+function buildCompactPageState(page) {
+  if (!page) {
+    return null;
+  }
+
+  return {
+    title: page.title || "",
+    url: page.url || "",
+    signature: page.signature || "",
+    viewport: page.viewport || null,
+    metadata: page.metadata || null,
+    landmarks: Array.isArray(page.landmarks) ? page.landmarks.slice(0, 6) : [],
+    forms: Array.isArray(page.forms) ? page.forms.slice(0, 4) : [],
+    topElements: Array.isArray(page.interactiveElements)
+      ? page.interactiveElements.slice(0, 8).map((entry) => ({
+        id: entry.id,
+        rank: entry.rank,
+        tag: entry.tag,
+        role: entry.role,
+        type: entry.type,
+        text: entry.text,
+        rect: entry.rect
+      }))
+      : []
+  };
+}
+
+function buildPageStateDiff(previousPage, currentPage) {
+  if (!currentPage) {
+    return null;
+  }
+
+  if (!previousPage) {
+    return {
+      changed: true,
+      summary: "Captured the first page-state baseline for this tab.",
+      changes: ["Initial page observation recorded."]
+    };
+  }
+
+  const changes = [];
+  if (previousPage.url !== currentPage.url) {
+    changes.push(`URL changed to ${formatDisplayUrl(currentPage.url || "")}.`);
+  }
+  if (previousPage.title !== currentPage.title) {
+    changes.push(`Title changed to "${truncate(currentPage.title || "Untitled", 80)}".`);
+  }
+  if (previousPage.signature !== currentPage.signature) {
+    changes.push("The ranked page structure changed.");
+  }
+
+  const previousIds = new Set((previousPage.interactiveElements || []).map((entry) => entry.id));
+  const currentIds = new Set((currentPage.interactiveElements || []).map((entry) => entry.id));
+  const added = (currentPage.interactiveElements || []).filter((entry) => !previousIds.has(entry.id)).slice(0, 5);
+  const removed = (previousPage.interactiveElements || []).filter((entry) => !currentIds.has(entry.id)).slice(0, 5);
+
+  if (added.length) {
+    changes.push(`New interactive targets appeared: ${added.map((entry) => entry.text || entry.tag).join(", ")}.`);
+  }
+  if (removed.length) {
+    changes.push(`Interactive targets disappeared: ${removed.map((entry) => entry.text || entry.tag).join(", ")}.`);
+  }
+
+  if ((previousPage.viewport?.scrollY || 0) !== (currentPage.viewport?.scrollY || 0)) {
+    changes.push(`Scroll position moved to ${currentPage.viewport?.scrollY || 0}px.`);
+  }
+
+  if ((previousPage.forms?.length || 0) !== (currentPage.forms?.length || 0)) {
+    changes.push(`Form count changed from ${previousPage.forms?.length || 0} to ${currentPage.forms?.length || 0}.`);
+  }
+
+  if ((previousPage.landmarks?.length || 0) !== (currentPage.landmarks?.length || 0)) {
+    changes.push(`Landmark count changed from ${previousPage.landmarks?.length || 0} to ${currentPage.landmarks?.length || 0}.`);
+  }
+
+  if (previousPage.visualGrounding?.screenshot?.fingerprint && currentPage.visualGrounding?.screenshot?.fingerprint &&
+    previousPage.visualGrounding.screenshot.fingerprint !== currentPage.visualGrounding.screenshot.fingerprint) {
+    changes.push("The screenshot grounding changed.");
+  }
+
+  return {
+    changed: changes.length > 0,
+    summary: changes.length ? changes.slice(0, 3).join(" ") : "No major page-state changes detected.",
+    changes
+  };
+}
+
+function cloneObservedPage(page) {
+  return page ? JSON.parse(JSON.stringify(page)) : null;
+}
+
+function mergeSummaries(primary, secondary) {
+  if (!primary) {
+    return secondary || "";
+  }
+  if (!secondary) {
+    return primary;
+  }
+
+  return `${primary} ${secondary}`;
+}
+
+function serializeToolResult(result) {
+  return result ? JSON.parse(JSON.stringify(result, (key, value) => key === "imageBase64" ? undefined : value)) : result;
+}
+
+function buildVisualGroundingMessage(modelName, toolName, result) {
+  if (!modelSupportsVision(modelName)) {
+    return null;
+  }
+
+  const visualContext = result?.visualContext;
+  if (!visualContext?.imageBase64) {
+    return null;
+  }
+
+  const content = [
+    `Visual grounding for ${toolName}.`,
+    visualContext.summary || "A screenshot of the current viewport is attached.",
+    visualContext.ocr?.ok && visualContext.ocr.text
+      ? `OCR excerpt: ${truncate(visualContext.ocr.text, 900)}`
+      : "OCR text was unavailable for this screenshot.",
+    "Use the attached image to verify layout, visually rendered text, and on-screen element positions."
+  ].join("\n");
+
+  return {
+    role: "user",
+    content,
+    images: [visualContext.imageBase64]
+  };
+}
+
+function modelSupportsVision(modelName) {
+  const name = String(modelName || "");
+  return VISION_MODEL_PATTERNS.some((pattern) => pattern.test(name));
 }
 
 async function waitForDomReady(webview) {
@@ -1240,8 +2351,9 @@ function describeToolUse(name, args) {
 }
 
 function summarizeToolResult(name, result) {
+  const diffSummary = result.pageStateDiff?.summary ? ` ${result.pageStateDiff.summary}` : "";
   if (result.summary) {
-    return `${name}: ${result.summary}`;
+    return `${name}: ${result.summary}${diffSummary}`;
   }
   if (result.error) {
     return `${name} failed: ${result.error}`;
@@ -1249,7 +2361,7 @@ function summarizeToolResult(name, result) {
   return `${name}: completed.`;
 }
 
-function buildConversationMessages() {
+function buildConversationHistoryMessages() {
   const tab = getActiveTab();
   const activeTabLine = tab
     ? `Active tab right now: ${tab.title || "Untitled"} (${formatDisplayUrl(tab.url || "") || "no url"}).`
@@ -1282,10 +2394,1197 @@ function buildConversationMessages() {
     };
   });
 
+  return conversationMessages;
+}
+
+function buildConversationMessages(systemPrompt = SYSTEM_PROMPT) {
   return [
-    { role: "system", content: SYSTEM_PROMPT },
-    ...conversationMessages
+    { role: "system", content: systemPrompt },
+    ...buildConversationHistoryMessages()
   ];
+}
+
+function formatObservationForPrompt(page, { includeVisibleText } = {}) {
+  if (!page) {
+    return "No page observation available.";
+  }
+
+  const lines = [
+    `Title: ${page.title || "Untitled"}`,
+    `URL: ${formatDisplayUrl(page.url || "") || "unknown"}`,
+    `Ready state: ${page.readyState || "unknown"}`,
+    `Page type: ${page.metadata?.pageType || "general"}`,
+    `Viewport scroll: ${page.viewport?.scrollY || 0}px`,
+    page.landmarks?.length
+      ? `Landmarks: ${page.landmarks.slice(0, 6).map((entry) => `${entry.role}${entry.name ? ` (${entry.name})` : ""}`).join("; ")}`
+      : "Landmarks: none detected",
+    page.forms?.length
+      ? `Forms: ${page.forms.slice(0, 4).map((entry) => `${entry.name || "unnamed form"} with ${entry.fieldCount} fields`).join("; ")}`
+      : "Forms: none detected",
+    page.interactiveElements?.length
+      ? `Top interactive elements: ${page.interactiveElements.slice(0, 8).map((entry) => `#${entry.rank} ${entry.tag}${entry.text ? ` "${truncate(entry.text, 60)}"` : ""}`).join("; ")}`
+      : "Top interactive elements: none detected",
+    page.visualGrounding?.ocr?.ok && page.visualGrounding.ocr.text
+      ? `OCR excerpt: ${truncate(page.visualGrounding.ocr.text, 500)}`
+      : ""
+  ];
+
+  if (includeVisibleText && page.visibleText) {
+    lines.push(`Visible text excerpt: ${truncate(page.visibleText, 700)}`);
+  }
+
+  return lines.filter(Boolean).join("\n");
+}
+
+function normalizeExecutionPlan(parsedPlan, task, workflowContext) {
+  const rawSteps = Array.isArray(parsedPlan)
+    ? parsedPlan
+    : Array.isArray(parsedPlan?.steps)
+      ? parsedPlan.steps
+      : [];
+
+  const steps = rawSteps
+    .map((step, index) => ({
+      id: `step-${index + 1}`,
+      objective: truncate(String(step?.objective || step?.title || "").trim(), 180),
+      successCriteria: truncate(String(step?.successCriteria || step?.expected || step?.objective || "").trim(), 220)
+    }))
+    .filter((step) => step.objective)
+    .slice(0, MAX_PLAN_STEPS);
+
+  if (!steps.length) {
+    const workflowFallback = buildWorkflowFallbackPlan(task, workflowContext);
+    return {
+      summary: workflowFallback.summary,
+      workflow: workflowContext?.selected || null,
+      steps: workflowFallback.steps
+    };
+  }
+
+  return {
+    summary: truncate(String(parsedPlan?.summary || "Complete the request in a few verified browser steps.").trim(), 220),
+    workflow: workflowContext?.selected || null,
+    steps
+  };
+}
+
+function formatExecutionPlan(plan) {
+  const prefix = plan.workflow?.name ? `[${plan.workflow.name}] ` : "";
+  return `${prefix}${plan.steps.map((step, index) => `${index + 1}. ${step.objective}`).join(" ")}`;
+}
+
+function buildExecutorPrompt({ task, taskId, plan, step, stepIndex, completedSteps, verifierFeedback, latestObservation }) {
+  const memoryContext = buildRelevantMemoryContext(task, taskId);
+  return [
+    `User request: ${task}`,
+    `Plan summary: ${plan.summary}`,
+    plan.workflow?.name ? `Selected workflow: ${plan.workflow.name}` : "",
+    `Current step (${stepIndex + 1}/${plan.steps.length}): ${step.objective}`,
+    `Success criteria: ${step.successCriteria}`,
+    completedSteps.length
+      ? `Completed steps: ${completedSteps.map((entry) => entry.objective).join(" | ")}`
+      : "Completed steps: none",
+    `Relevant memory:\n${formatMemoryContext(memoryContext)}`,
+    latestObservation?.page
+      ? `Latest observation:\n${formatObservationForPrompt(latestObservation.page, { includeVisibleText: false })}`
+      : "Latest observation: use inspect_page if you need fresh page facts.",
+    verifierFeedback ? `Verifier feedback from the last attempt:\n${verifierFeedback}` : "",
+    "Use tools only for this step. When the step is done, reply with a concise completion summary."
+  ].filter(Boolean).join("\n\n");
+}
+
+function normalizeVerificationResult(parsedResult, observation) {
+  const verdict = ["complete", "retry", "blocked"].includes(parsedResult?.verdict)
+    ? parsedResult.verdict
+    : observation?.pageStateDiff?.changed
+      ? "retry"
+      : "blocked";
+
+  return {
+    verdict,
+    reason: truncate(String(parsedResult?.reason || parsedResult?.message || (verdict === "complete" ? "The step appears complete." : "The step is not yet verified.")).trim(), 220),
+    evidence: truncate(String(parsedResult?.evidence || observation?.pageStateDiff?.summary || "").trim(), 260),
+    nextActionHint: truncate(String(parsedResult?.nextActionHint || "").trim(), 220)
+  };
+}
+
+function formatStepOutcome(entry, index) {
+  return [
+    `${index + 1}. ${entry.objective}`,
+    `   Verdict: ${entry.verification?.verdict || "unknown"}`,
+    `   Executor: ${entry.executorSummary || "No executor summary."}`,
+    entry.verification?.reason ? `   Verifier: ${entry.verification.reason}` : "",
+    entry.observationSummary ? `   Page diff: ${entry.observationSummary}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function buildLocalFinalSummary(task, completedSteps) {
+  const blockedStep = completedSteps.find((entry) => entry.verification?.verdict !== "complete") || null;
+  if (!completedSteps.length) {
+    return `I wasn't able to make progress on "${task}".`;
+  }
+
+  if (blockedStep) {
+    return `I made progress on "${task}", but stopped at "${blockedStep.objective}" because ${blockedStep.verification?.reason || "it could not be verified"}.`;
+  }
+
+  return completedSteps
+    .map((entry) => entry.executorSummary)
+    .filter(Boolean)
+    .join(" ");
+}
+
+function parseJsonResponse(content) {
+  const text = String(content || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const candidates = [text];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    candidates.push(fenced[1].trim());
+  }
+
+  const objectStart = text.indexOf("{");
+  const objectEnd = text.lastIndexOf("}");
+  if (objectStart !== -1 && objectEnd > objectStart) {
+    candidates.push(text.slice(objectStart, objectEnd + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Keep trying narrower candidates.
+    }
+  }
+
+  return null;
+}
+
+function buildWorkflowContext(task, page, memoryContext) {
+  const builtinCandidates = scoreBuiltinWorkflowRecipes(task, page);
+  const learnedCandidate = selectLearnedWorkflow(task, memoryContext);
+  const candidates = [
+    learnedCandidate,
+    ...builtinCandidates
+  ]
+    .filter(Boolean)
+    .sort(compareWorkflowCandidates)
+    .slice(0, WORKFLOW_CANDIDATE_LIMIT);
+  const selected = chooseWorkflowCandidate(candidates);
+
+  return {
+    selected,
+    candidates,
+    builtins: BUILTIN_WORKFLOW_RECIPES,
+    builtinCandidates,
+    learnedCandidate,
+    learned: Array.isArray(memoryContext?.workflows) ? memoryContext.workflows : []
+  };
+}
+
+function selectBuiltinWorkflowRecipe(task, page) {
+  return chooseWorkflowCandidate(scoreBuiltinWorkflowRecipes(task, page));
+}
+
+function scoreBuiltinWorkflowRecipes(task, page) {
+  const taskText = normalizeWorkflowMatcherText(task);
+  const pageText = buildWorkflowPageMatcherText(page);
+  const pageType = normalizeWorkflowMatcherText(page?.metadata?.pageType || "");
+
+  return BUILTIN_WORKFLOW_RECIPES
+    .map((recipe) => {
+      const taskSignals = Array.from(new Set([...(recipe.taskSignals || []), ...(recipe.matchKeywords || [])]));
+      const taskHits = collectWorkflowSignalMatches(taskText, taskSignals);
+      const pageHits = collectWorkflowSignalMatches(pageText, recipe.pageSignals || []);
+      const negativeHits = collectWorkflowSignalMatches(taskText, recipe.negativeTaskSignals || []);
+
+      let score = (taskHits.length * WORKFLOW_TASK_SIGNAL_WEIGHT)
+        + (pageHits.length * WORKFLOW_PAGE_SIGNAL_WEIGHT)
+        - (negativeHits.length * WORKFLOW_NEGATIVE_SIGNAL_WEIGHT);
+
+      if (taskHits.length && pageHits.length) {
+        score += 0.5;
+      }
+
+      if (pageType && pageHits.some((entry) => normalizeWorkflowMatcherText(entry) === pageType)) {
+        score += 0.5;
+      }
+
+      if (negativeHits.length && !taskHits.length) {
+        score -= 1;
+      }
+
+      const reasons = [];
+      if (taskHits.length) {
+        reasons.push(`task intent matched ${taskHits.join(", ")}`);
+      }
+      if (pageHits.length) {
+        reasons.push(`page context matched ${pageHits.join(", ")}`);
+      }
+      if (negativeHits.length) {
+        reasons.push(`conflicting task intent ${negativeHits.join(", ")}`);
+      }
+
+      return {
+        ...recipe,
+        source: "builtin",
+        score,
+        confidence: 0,
+        taskHits,
+        pageHits,
+        negativeHits,
+        reasons
+      };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort(compareWorkflowCandidates)
+    .map((candidate, index, entries) => ({
+      ...candidate,
+      confidence: estimateWorkflowConfidence(candidate, entries[0], entries[1], index)
+    }))
+    .sort(compareWorkflowCandidates)
+    .slice(0, WORKFLOW_CANDIDATE_LIMIT);
+}
+
+function chooseWorkflowCandidate(candidates) {
+  const ranked = Array.isArray(candidates)
+    ? candidates.filter(Boolean).sort(compareWorkflowCandidates)
+    : [];
+  const top = ranked[0];
+  const runnerUp = ranked[1];
+
+  if (!top) {
+    return null;
+  }
+
+  if ((top.confidence || 0) < WORKFLOW_CONFIDENCE_THRESHOLD) {
+    return null;
+  }
+
+  if (runnerUp) {
+    const closeConfidence = Math.abs((top.confidence || 0) - (runnerUp.confidence || 0)) < 0.08;
+    const closeScore = Math.abs((top.score || 0) - (runnerUp.score || 0)) < 1.5;
+    if (closeConfidence && closeScore) {
+      return null;
+    }
+  }
+
+  return top;
+}
+
+function compareWorkflowCandidates(left, right) {
+  if ((right?.confidence || 0) !== (left?.confidence || 0)) {
+    return (right?.confidence || 0) - (left?.confidence || 0);
+  }
+  if ((right?.score || 0) !== (left?.score || 0)) {
+    return (right?.score || 0) - (left?.score || 0);
+  }
+  if ((right?.taskHits?.length || 0) !== (left?.taskHits?.length || 0)) {
+    return (right?.taskHits?.length || 0) - (left?.taskHits?.length || 0);
+  }
+  return String(left?.name || "").localeCompare(String(right?.name || ""));
+}
+
+function estimateWorkflowConfidence(candidate, topCandidate, runnerUpCandidate, index) {
+  const isTopCandidate = index === 0;
+  const scoreGap = isTopCandidate
+    ? (candidate.score || 0) - (runnerUpCandidate?.score || 0)
+    : (candidate.score || 0) - (topCandidate?.score || 0);
+  let confidence = 0.18
+    + ((candidate.taskHits?.length || 0) * 0.18)
+    + ((candidate.pageHits?.length || 0) * 0.06)
+    - ((candidate.negativeHits?.length || 0) * 0.22);
+
+  if ((candidate.score || 0) >= WORKFLOW_SELECTION_SCORE_THRESHOLD) {
+    confidence += 0.08;
+  }
+
+  confidence += isTopCandidate
+    ? Math.min(0.18, Math.max(0, scoreGap / 6))
+    : -Math.min(0.25, Math.max(0, Math.abs(scoreGap) / 6));
+
+  if (!candidate.taskHits?.length && (candidate.pageHits?.length || 0) < 2) {
+    confidence -= 0.12;
+  }
+
+  return clampNumber(confidence, 0.05, 0.95, 0.5);
+}
+
+function buildWorkflowPageMatcherText(page) {
+  return normalizeWorkflowMatcherText([
+    page?.metadata?.pageType,
+    page?.title,
+    page?.url
+  ].filter(Boolean).join(" "));
+}
+
+function collectWorkflowSignalMatches(text, signals) {
+  const normalizedText = normalizeWorkflowMatcherText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  return Array.from(new Set((signals || []).filter((signal) => workflowSignalMatchesText(normalizedText, signal))));
+}
+
+function workflowSignalMatchesText(text, signal) {
+  const normalizedSignal = normalizeWorkflowMatcherText(signal);
+  if (!normalizedSignal) {
+    return false;
+  }
+
+  const pattern = new RegExp(`(^|\\s)${escapeWorkflowRegExp(normalizedSignal).replace(/\s+/g, "\\s+")}(?=\\s|$)`, "i");
+  return pattern.test(text);
+}
+
+function normalizeWorkflowMatcherText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/https?:\/\//g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeWorkflowRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function selectLearnedWorkflow(task, memoryContext) {
+  const workflows = Array.isArray(memoryContext?.workflows) ? memoryContext.workflows : [];
+  const fingerprint = buildTaskFingerprint(task);
+  const candidate = workflows
+    .filter((entry) =>
+      taskFingerprintsOverlap(fingerprint, entry.taskSnippet || "") &&
+      (entry.successCount || 0) > 0
+    )
+    .map((entry) => {
+      const overlap = countTaskFingerprintOverlap(fingerprint, entry.taskSnippet || "");
+      const successRate = entry.runCount ? (entry.successCount || 0) / entry.runCount : 0;
+      const confidence = clampNumber(0.26 + (overlap * 0.14) + (successRate * 0.28), 0.05, 0.9, 0.45);
+      return {
+        ...entry,
+        overlap,
+        confidence
+      };
+    })
+    .sort((left, right) => {
+      if ((right.confidence || 0) !== (left.confidence || 0)) {
+        return (right.confidence || 0) - (left.confidence || 0);
+      }
+      return (right.successCount || 0) - (left.successCount || 0);
+    })[0];
+
+  if (!candidate) {
+    return null;
+  }
+
+  return {
+    id: candidate.key,
+    name: candidate.taskSnippet || "Learned workflow",
+    source: "learned",
+    score: candidate.overlap || 0,
+    confidence: candidate.confidence || 0.6,
+    inputs: ["task goal"],
+    outputs: ["verified browser state"],
+    successConditions: [candidate.finalSummary || "The workflow completes with a verified result."],
+    retryRules: ["Retry using the stored successful pattern, then re-inspect the page."],
+    steps: Array.isArray(candidate.stepsPreview) ? candidate.stepsPreview : [],
+    reasons: [`matched a prior successful workflow with ${candidate.overlap || 0} shared task cues`]
+  };
+}
+
+function formatWorkflowContext(workflowContext) {
+  const lines = [];
+  if (workflowContext?.selected) {
+    lines.push(`Recommended workflow: ${workflowContext.selected.name} (${workflowContext.selected.source}, ${Math.round((workflowContext.selected.confidence || 0) * 100)}% confidence).`);
+    lines.push(`Inputs: ${(workflowContext.selected.inputs || []).join(", ") || "task goal"}`);
+    lines.push(`Outputs: ${(workflowContext.selected.outputs || []).join(", ") || "verified result"}`);
+    lines.push(`Success conditions: ${(workflowContext.selected.successConditions || []).join("; ") || "Task completed and verified."}`);
+    lines.push(`Retry rules: ${(workflowContext.selected.retryRules || []).join("; ") || "Re-inspect and retry carefully."}`);
+    if (workflowContext.selected.reasons?.length) {
+      lines.push(`Why this fits: ${workflowContext.selected.reasons.join("; ")}`);
+    }
+    if (workflowContext.selected.steps?.length) {
+      lines.push(`Recipe steps: ${workflowContext.selected.steps.join(" | ")}`);
+    }
+  } else if (workflowContext?.candidates?.length) {
+    lines.push("No exact workflow lock yet. Use the leading candidates as hints, not hard instructions.");
+  } else {
+    lines.push("No exact workflow match yet. Use the browser workflow library conservatively.");
+  }
+
+  if (workflowContext?.candidates?.length) {
+    lines.push(`Candidate ranking: ${workflowContext.candidates.map((candidate) => `${candidate.name} [${candidate.source}, ${Math.round((candidate.confidence || 0) * 100)}%, score ${Number(candidate.score || 0).toFixed(1)}]`).join(" | ")}`);
+  }
+
+  if (workflowContext?.learned?.length) {
+    lines.push(`Learned examples: ${workflowContext.learned.slice(0, 3).map((entry) => `${entry.taskSnippet} (${entry.successCount || 0}/${entry.runCount || 0})`).join(" | ")}`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildWorkflowFallbackPlan(task, workflowContext) {
+  const selected = workflowContext?.selected;
+  if (!selected || !selected.steps?.length) {
+    return {
+      summary: "Single-step fallback plan.",
+      steps: [{
+        id: "step-1",
+        objective: truncate(task, 180),
+        successCriteria: "The user's request is completed and the browser state confirms it."
+      }]
+    };
+  }
+
+  return {
+    summary: `${selected.name} workflow fallback plan.`,
+    steps: selected.steps.slice(0, MAX_PLAN_STEPS).map((objective, index) => ({
+      id: `step-${index + 1}`,
+      objective: truncate(objective, 180),
+      successCriteria: truncate(selected.successConditions?.[Math.min(index, (selected.successConditions?.length || 1) - 1)] || "The step has a clear, observable result.", 220)
+    }))
+  };
+}
+
+function normalizeTrustedOriginsInput(value) {
+  return parseTrustedOrigins(value).join("\n");
+}
+
+function parseTrustedOrigins(value) {
+  return String(value || "")
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .map((entry) => entry.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+    .filter((entry, index, entries) => entries.indexOf(entry) === index);
+}
+
+function isTrustedOrigin(url) {
+  const domain = extractMemoryDomain(url);
+  if (!domain) {
+    return true;
+  }
+
+  const trustedOrigins = parseTrustedOrigins(state.settings.trustedOrigins);
+  return trustedOrigins.some((entry) => domain === entry || domain.endsWith(`.${entry}`));
+}
+
+function updatePolicyGuidance(trustedOriginsValue) {
+  const trustedOrigins = parseTrustedOrigins(trustedOriginsValue);
+  if (!trustedOrigins.length) {
+    elements.policyGuidance.textContent = "No trusted origins saved yet. Mutating actions outside obviously safe contexts will ask for approval.";
+    elements.policyGuidance.className = "policy-guidance warning";
+    return;
+  }
+
+  elements.policyGuidance.textContent = `Trusted origins: ${trustedOrigins.join(", ")}. Sensitive or destructive actions still require approval.`;
+  elements.policyGuidance.className = "policy-guidance";
+}
+
+async function evaluateSafetyPolicy(toolName, args) {
+  const tab = getActiveTab();
+  const currentUrl = tab?.url || "";
+  const trusted = isTrustedOrigin(currentUrl);
+  const observedPage = tab?.lastObservedPage || null;
+  const targetHints = collectPolicyTargetHints(toolName, args, observedPage);
+  const combinedHints = targetHints.join(" ").toLowerCase();
+  const pageText = [
+    observedPage?.visibleText || "",
+    observedPage?.visualGrounding?.ocr?.text || ""
+  ].join(" ").toLowerCase();
+
+  if (pageText.includes("captcha") || pageText.includes("recaptcha") || pageText.includes("human verification")) {
+    return {
+      blocked: true,
+      requiresApproval: false,
+      reason: "CAPTCHA or human verification detected. The browser should stop and ask for your help."
+    };
+  }
+
+  const isSensitive = SENSITIVE_ACTION_PATTERNS.some((pattern) => pattern.test(combinedHints));
+  const isMutating = MUTATING_TOOLS.has(toolName);
+  const destinationDomain = ["navigate_to", "open_or_search"].includes(toolName)
+    ? extractMemoryDomain(normalizeDestination(args.url || args.query || ""))
+    : "";
+  const crossOriginNavigation = Boolean(destinationDomain && destinationDomain !== extractMemoryDomain(currentUrl) && !isTrustedOrigin(`https://${destinationDomain}`));
+  const authWall = observedPage?.metadata?.pageType === "login";
+  const targetElement = findObservedElementById(observedPage, args.elementId);
+  const passwordField = targetElement?.type === "password";
+
+  if (isSensitive) {
+    return {
+      blocked: false,
+      requiresApproval: true,
+      reason: `Sensitive browser action detected for ${toolName}. Approval is required.`
+    };
+  }
+
+  if (passwordField || authWall && toolName === "type_into_element") {
+    return {
+      blocked: false,
+      requiresApproval: true,
+      reason: "You are about to enter credentials on a login page. Approval is required."
+    };
+  }
+
+  if (crossOriginNavigation) {
+    return {
+      blocked: false,
+      requiresApproval: true,
+      reason: `Navigation to untrusted origin ${destinationDomain} requires approval.`
+    };
+  }
+
+  if (isMutating && !trusted) {
+    return {
+      blocked: false,
+      requiresApproval: true,
+      reason: `Mutating action on untrusted origin ${extractMemoryDomain(currentUrl) || "unknown"} requires approval.`
+    };
+  }
+
+  return {
+    blocked: false,
+    requiresApproval: false,
+    reason: ""
+  };
+}
+
+function collectPolicyTargetHints(toolName, args, observedPage) {
+  const hints = [toolName, state.currentTask || ""];
+  if (typeof args?.query === "string") {
+    hints.push(args.query);
+  }
+  if (typeof args?.url === "string") {
+    hints.push(args.url);
+  }
+  if (typeof args?.text === "string") {
+    hints.push(args.text);
+  }
+
+  const target = findObservedElementById(observedPage, args?.elementId);
+  if (target) {
+    hints.push(target.text || "", target.name || "", target.role || "", target.type || "");
+  }
+
+  return hints.filter(Boolean);
+}
+
+function findObservedElementById(observedPage, elementId) {
+  if (!observedPage || !elementId) {
+    return null;
+  }
+
+  const interactive = Array.isArray(observedPage.interactiveElements) ? observedPage.interactiveElements : [];
+  return interactive.find((entry) => entry.id === elementId) || null;
+}
+
+function categorizeExecutionFailure({ verification, lastToolExecution, observation }) {
+  const combined = [
+    verification?.reason || "",
+    verification?.evidence || "",
+    lastToolExecution?.transcriptResult?.error || "",
+    observation?.page?.visibleText || "",
+    observation?.page?.visualGrounding?.ocr?.text || ""
+  ].join(" ").toLowerCase();
+
+  if (combined.includes("captcha") || combined.includes("recaptcha") || combined.includes("human verification")) {
+    return "captcha";
+  }
+  if (combined.includes("login") || combined.includes("sign in") || combined.includes("authentication")) {
+    return "auth_wall";
+  }
+  if (combined.includes("not found") || combined.includes("inspect the page again") || combined.includes("missing")) {
+    return "missing_element";
+  }
+  if (combined.includes("timed out") || combined.includes("navigation failed") || combined.includes("unable to restore")) {
+    return "navigation";
+  }
+  if (combined.includes("policy") || combined.includes("approval")) {
+    return combined.includes("denied") ? "approval_denied" : "policy_blocked";
+  }
+
+  const activeDomain = state.memory.activeGoal?.activeDomain || "";
+  const currentDomain = extractMemoryDomain(getActiveTab()?.url || "");
+  if (activeDomain && currentDomain && activeDomain !== currentDomain) {
+    return "wrong_domain";
+  }
+
+  if (observation?.pageStateDiff && !observation.pageStateDiff.changed) {
+    return "no_state_change";
+  }
+
+  return "general";
+}
+
+async function attemptAutomaticRecovery({ taskId, step, verification, failureCategory, lastToolExecution, observation, budget }) {
+  const currentDomain = extractMemoryDomain(getActiveTab()?.url || "");
+  const targetDomain = state.memory.activeGoal?.activeDomain || currentDomain;
+  let note = "";
+  let success = false;
+  let blocked = false;
+  let nextActionHint = "";
+
+  switch (failureCategory) {
+    case "captcha":
+      blocked = true;
+      note = "CAPTCHA or human verification needs direct user help.";
+      nextActionHint = "Pause the agent and complete the verification manually.";
+      break;
+    case "auth_wall":
+      blocked = true;
+      note = "Authentication boundary detected. The browser should wait for user approval or credentials.";
+      nextActionHint = "Help the browser complete login or provide credentials manually.";
+      break;
+    case "missing_element":
+      await observeCurrentPage({
+        includeText: false,
+        includeMetadata: true,
+        includeScreenshot: false,
+        includeOcr: false,
+        includeDiff: true
+      });
+      note = "Re-inspected the page after an element lookup failure.";
+      success = true;
+      break;
+    case "navigation":
+      await reloadActiveTab();
+      await observeCurrentPage({
+        includeText: false,
+        includeMetadata: true,
+        includeScreenshot: false,
+        includeOcr: false,
+        includeDiff: true
+      });
+      note = "Reloaded the current tab after a navigation or load failure.";
+      success = true;
+      break;
+    case "wrong_domain": {
+      const matchingTab = state.tabs.find((tab) => extractMemoryDomain(tab.url || "") === targetDomain);
+      if (matchingTab) {
+        selectTab(matchingTab.id);
+        note = `Switched back to the ${targetDomain} tab to recover context.`;
+        success = true;
+      } else if (getActiveTab()?.webview?.canGoBack?.()) {
+        await goBack();
+        note = "Went back one step to recover the expected browsing context.";
+        success = true;
+      } else {
+        note = "Could not automatically recover the expected domain context.";
+      }
+      break;
+    }
+    case "no_state_change":
+      if (lastToolExecution?.name === "click_element" || lastToolExecution?.name === "type_into_element") {
+        await observeCurrentPage({
+          includeText: false,
+          includeMetadata: true,
+          includeScreenshot: false,
+          includeOcr: false,
+          includeDiff: true
+        });
+        note = "Re-inspected the page because the last action did not change state.";
+        success = true;
+      } else {
+        note = "No page-state change detected; the next executor attempt should inspect and choose a different action.";
+      }
+      break;
+    default:
+      note = `No automatic recovery path was triggered for ${FAILURE_CATEGORIES[failureCategory] || failureCategory}.`;
+      break;
+  }
+
+  recordRecoveryTelemetry(taskId, step, failureCategory, success, note);
+  return {
+    blocked,
+    recovered: success,
+    note,
+    nextActionHint
+  };
+}
+
+function recordTaskTelemetryStart(taskId, task) {
+  state.telemetry.summary.taskRuns += 1;
+  state.telemetry.activeRun = {
+    taskId,
+    task: truncate(task, 180),
+    workflowName: "",
+    startedAt: new Date().toISOString(),
+    recoveries: 0,
+    failureCategory: "",
+    status: "running"
+  };
+  pushTelemetryEvent("task", `Started task: ${truncate(task, 120)}`);
+  persistTelemetry();
+}
+
+function updateTaskTelemetryPlan(taskId, plan) {
+  if (state.telemetry.activeRun?.taskId !== taskId) {
+    return;
+  }
+  state.telemetry.activeRun.workflowName = plan.workflow?.name || "";
+  pushTelemetryEvent("plan", `Plan created${plan.workflow?.name ? ` with workflow ${plan.workflow.name}` : ""}.`);
+  persistTelemetry();
+}
+
+function recordTaskTelemetryFinish(taskId, status, completedSteps, message) {
+  if (status === "completed") {
+    state.telemetry.summary.taskSuccesses += 1;
+  } else {
+    state.telemetry.summary.taskBlocked += 1;
+  }
+
+  if (status !== "completed" && message) {
+    state.telemetry.lastFailure = truncate(message, 180);
+  }
+
+  if (state.telemetry.activeRun?.taskId === taskId) {
+    state.telemetry.activeRun.status = status;
+    state.telemetry.activeRun.finishedAt = new Date().toISOString();
+    state.telemetry.activeRun.completedSteps = completedSteps.length;
+    if (message) {
+      state.telemetry.activeRun.failureCategory = message;
+    }
+    pushTelemetryEvent("task", `Task ${status}: ${state.telemetry.activeRun.task}`);
+    state.telemetry.activeRun = null;
+  }
+  persistTelemetry();
+}
+
+function recordStepTelemetryAttempt(taskId, step, attempt) {
+  state.telemetry.summary.stepAttempts += 1;
+  pushTelemetryEvent("step", `Attempt ${attempt} for ${truncate(step.objective, 90)}`);
+  persistTelemetry();
+}
+
+function recordStepTelemetryVerification(taskId, step, verification, failureCategory) {
+  if (verification?.verdict === "complete") {
+    state.telemetry.summary.stepSuccesses += 1;
+  } else if (failureCategory) {
+    state.telemetry.failureCategories[failureCategory] = (state.telemetry.failureCategories[failureCategory] || 0) + 1;
+    state.telemetry.lastFailure = truncate(`${FAILURE_CATEGORIES[failureCategory] || failureCategory}: ${verification?.reason || ""}`, 180);
+  }
+  persistTelemetry();
+}
+
+function recordRecoveryTelemetry(taskId, step, failureCategory, success, note) {
+  state.telemetry.summary.recoveryAttempts += 1;
+  if (success) {
+    state.telemetry.summary.recoverySuccesses += 1;
+  }
+  if (state.telemetry.activeRun?.taskId === taskId) {
+    state.telemetry.activeRun.recoveries = (state.telemetry.activeRun.recoveries || 0) + 1;
+    state.telemetry.activeRun.failureCategory = failureCategory;
+  }
+  pushTelemetryEvent("recovery", `${success ? "Recovered" : "Recovery attempted"} after ${FAILURE_CATEGORIES[failureCategory] || failureCategory}: ${truncate(note, 100)}`);
+  persistTelemetry();
+}
+
+function recordApprovalTelemetry(approved, reason) {
+  if (approved === null) {
+    state.telemetry.summary.approvalsRequested += 1;
+  } else if (approved === true) {
+    state.telemetry.summary.approvalsGranted += 1;
+  } else if (approved === false) {
+    state.telemetry.summary.approvalsDenied += 1;
+    state.telemetry.lastFailure = truncate(reason || "Approval denied.", 180);
+  }
+  pushTelemetryEvent("approval", truncate(reason || "Approval decision recorded.", 100));
+  persistTelemetry();
+}
+
+function recordToolTelemetry(name, result) {
+  state.telemetry.summary.toolCalls += 1;
+  if (result?.failureCategory) {
+    state.telemetry.failureCategories[result.failureCategory] = (state.telemetry.failureCategories[result.failureCategory] || 0) + 1;
+  }
+  pushTelemetryEvent("tool", `${name}: ${truncate(result?.summary || result?.error || "completed", 90)}`);
+  persistTelemetry();
+}
+
+function pushTelemetryEvent(type, message) {
+  state.telemetry.recentEvents.unshift({
+    type,
+    message: truncate(message, 160),
+    timestamp: new Date().toISOString()
+  });
+  state.telemetry.recentEvents = state.telemetry.recentEvents.slice(0, TELEMETRY_EVENT_LIMIT);
+}
+
+function renderTelemetry() {
+  elements.telemetryTaskSuccess.textContent = formatPercent(state.telemetry.summary.taskSuccesses, state.telemetry.summary.taskRuns);
+  elements.telemetryStepSuccess.textContent = formatPercent(state.telemetry.summary.stepSuccesses, state.telemetry.summary.stepAttempts);
+  elements.telemetryApprovalRate.textContent = formatPercent(state.telemetry.summary.approvalsGranted, state.telemetry.summary.approvalsRequested);
+  elements.telemetryRecoveryRate.textContent = formatPercent(state.telemetry.summary.recoverySuccesses, state.telemetry.summary.recoveryAttempts);
+
+  const topWorkflow = state.memory.workflows[0];
+  elements.telemetryWorkflowSummary.textContent = topWorkflow
+    ? `Top learned workflow: ${topWorkflow.taskSnippet} (${topWorkflow.successCount || 0}/${topWorkflow.runCount || 0} successful runs).`
+    : "Workflow library is still gathering examples.";
+  elements.telemetryLastFailure.textContent = state.telemetry.lastFailure || "No recorded failures yet.";
+}
+
+function formatPercent(numerator, denominator) {
+  if (!denominator) {
+    return "0%";
+  }
+  return `${Math.round((numerator / denominator) * 100)}%`;
+}
+
+function beginGoalMemory(task) {
+  const now = new Date().toISOString();
+  const domain = extractMemoryDomain(getActiveTab()?.url || "");
+  const taskId = `goal-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  state.memory.activeGoal = {
+    taskId,
+    task: truncate(task, 240),
+    status: "running",
+    startedAt: now,
+    updatedAt: now,
+    planSummary: "",
+    currentStepIndex: 0,
+    currentStepObjective: "Planning the task",
+    completedObjectives: [],
+    activeDomain: domain,
+    fingerprint: buildTaskFingerprint(task)
+  };
+  upsertGoalCheckpoint({
+    taskId,
+    task,
+    status: "running",
+    currentStepIndex: 0,
+    currentStepObjective: "Planning the task",
+    completedObjectives: [],
+    domain,
+    planSummary: "",
+    observationSummary: "Task planning started.",
+    verifierReason: "",
+    finalSummary: ""
+  });
+  persistAgentMemory();
+  return taskId;
+}
+
+function applyPlanToGoalMemory(taskId, plan, initialObservation) {
+  const activeGoal = state.memory.activeGoal;
+  if (!activeGoal || activeGoal.taskId !== taskId) {
+    return;
+  }
+
+  activeGoal.planSummary = truncate(plan.summary || "", 220);
+  activeGoal.updatedAt = new Date().toISOString();
+  activeGoal.currentStepIndex = plan.steps.length ? 1 : 0;
+  activeGoal.currentStepObjective = plan.steps[0]?.objective || "";
+  activeGoal.completedObjectives = [];
+  upsertGoalCheckpoint({
+    taskId,
+    task: activeGoal.task,
+    status: "running",
+    currentStepIndex: activeGoal.currentStepIndex,
+    currentStepObjective: activeGoal.currentStepObjective,
+    completedObjectives: [],
+    domain: activeGoal.activeDomain,
+    planSummary: activeGoal.planSummary,
+    observationSummary: initialObservation?.pageStateDiff?.summary || "Execution plan created.",
+    verifierReason: "",
+    finalSummary: ""
+  });
+  persistAgentMemory();
+}
+
+function updateGoalMemoryFromOutcome(taskId, plan, completedSteps) {
+  const activeGoal = state.memory.activeGoal;
+  if (!activeGoal || activeGoal.taskId !== taskId) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const latestOutcome = completedSteps[completedSteps.length - 1] || null;
+  const completedObjectives = completedSteps
+    .filter((entry) => entry.verification?.verdict === "complete")
+    .map((entry) => truncate(entry.objective, 120))
+    .slice(-MAX_PLAN_STEPS);
+  const nextStep = plan.steps[completedSteps.length] || null;
+  const status = latestOutcome?.verification?.verdict === "blocked"
+    ? "blocked"
+    : nextStep
+      ? "running"
+      : "completed";
+
+  activeGoal.status = status;
+  activeGoal.updatedAt = now;
+  activeGoal.completedObjectives = completedObjectives;
+  activeGoal.currentStepIndex = nextStep ? completedSteps.length + 1 : null;
+  activeGoal.currentStepObjective = nextStep?.objective || "";
+
+  upsertGoalCheckpoint({
+    taskId,
+    task: activeGoal.task,
+    status,
+    currentStepIndex: activeGoal.currentStepIndex,
+    currentStepObjective: activeGoal.currentStepObjective,
+    completedObjectives,
+    domain: activeGoal.activeDomain,
+    planSummary: activeGoal.planSummary,
+    observationSummary: latestOutcome?.observationSummary || "",
+    verifierReason: latestOutcome?.verification?.reason || "",
+    finalSummary: latestOutcome?.executorSummary || ""
+  });
+  persistAgentMemory();
+}
+
+function completeGoalMemory(taskId, plan, completedSteps, status, finalAnswer) {
+  const activeGoal = state.memory.activeGoal;
+  const domain = activeGoal?.activeDomain || extractMemoryDomain(getActiveTab()?.url || "");
+  const task = activeGoal?.task || "";
+
+  if (activeGoal && activeGoal.taskId === taskId) {
+    upsertGoalCheckpoint({
+      taskId,
+      task,
+      status,
+      currentStepIndex: null,
+      currentStepObjective: "",
+      completedObjectives: completedSteps
+        .filter((entry) => entry.verification?.verdict === "complete")
+        .map((entry) => truncate(entry.objective, 120))
+        .slice(-MAX_PLAN_STEPS),
+      domain,
+      planSummary: activeGoal.planSummary,
+      observationSummary: completedSteps[completedSteps.length - 1]?.observationSummary || "",
+      verifierReason: completedSteps.find((entry) => entry.verification?.verdict !== "complete")?.verification?.reason || "",
+      finalSummary: truncate(finalAnswer || "", 220)
+    });
+    recordWorkflowMemory({
+      task,
+      domain,
+      status,
+      plan,
+      completedSteps,
+      finalAnswer,
+      fingerprint: activeGoal.fingerprint,
+      workflow: plan.workflow || null
+    });
+    state.memory.activeGoal = status === "completed" ? null : {
+      ...activeGoal,
+      status,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  persistAgentMemory();
+}
+
+function failGoalMemory(taskId, error) {
+  const activeGoal = state.memory.activeGoal;
+  if (!activeGoal || activeGoal.taskId !== taskId) {
+    return;
+  }
+
+  activeGoal.status = "blocked";
+  activeGoal.updatedAt = new Date().toISOString();
+  upsertGoalCheckpoint({
+    taskId,
+    task: activeGoal.task,
+    status: "blocked",
+    currentStepIndex: activeGoal.currentStepIndex,
+    currentStepObjective: activeGoal.currentStepObjective,
+    completedObjectives: activeGoal.completedObjectives || [],
+    domain: activeGoal.activeDomain,
+    planSummary: activeGoal.planSummary || "",
+    observationSummary: "",
+    verifierReason: truncate(error?.message || "Task failed.", 180),
+    finalSummary: ""
+  });
+  persistAgentMemory();
+}
+
+function upsertGoalCheckpoint(checkpoint) {
+  const normalized = {
+    id: checkpoint.taskId,
+    taskId: checkpoint.taskId,
+    task: truncate(checkpoint.task || "", 240),
+    status: checkpoint.status || "running",
+    currentStepIndex: checkpoint.currentStepIndex,
+    currentStepObjective: truncate(checkpoint.currentStepObjective || "", 160),
+    completedObjectives: Array.isArray(checkpoint.completedObjectives) ? checkpoint.completedObjectives.slice(-MAX_PLAN_STEPS) : [],
+    domain: checkpoint.domain || "",
+    planSummary: truncate(checkpoint.planSummary || "", 220),
+    observationSummary: truncate(checkpoint.observationSummary || "", 180),
+    verifierReason: truncate(checkpoint.verifierReason || "", 180),
+    finalSummary: truncate(checkpoint.finalSummary || "", 220),
+    updatedAt: new Date().toISOString()
+  };
+
+  const existingIndex = state.memory.checkpoints.findIndex((entry) => entry.taskId === normalized.taskId);
+  if (existingIndex === -1) {
+    state.memory.checkpoints.unshift(normalized);
+  } else {
+    state.memory.checkpoints.splice(existingIndex, 1, {
+      ...state.memory.checkpoints[existingIndex],
+      ...normalized
+    });
+  }
+
+  state.memory.checkpoints.sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+  state.memory.checkpoints = state.memory.checkpoints.slice(0, MAX_MEMORY_CHECKPOINTS);
+}
+
+function recordWorkflowMemory({ task, domain, status, plan, completedSteps, finalAnswer, fingerprint, workflow }) {
+  const key = `${domain || "local"}::${workflow?.id || fingerprint || buildTaskFingerprint(task)}`;
+  const existing = state.memory.workflows.find((entry) => entry.key === key);
+  const now = new Date().toISOString();
+  const base = existing || {
+    key,
+    domain: domain || "",
+    taskSnippet: truncate(task || "", 140),
+    fingerprint: fingerprint || buildTaskFingerprint(task),
+    workflowId: workflow?.id || "",
+    workflowName: workflow?.name || "",
+    runCount: 0,
+    successCount: 0
+  };
+
+  const next = {
+    ...base,
+    domain: domain || base.domain || "",
+    taskSnippet: truncate(task || base.taskSnippet || "", 140),
+    workflowId: workflow?.id || base.workflowId || "",
+    workflowName: workflow?.name || base.workflowName || "",
+    runCount: (base.runCount || 0) + 1,
+    successCount: (base.successCount || 0) + (status === "completed" ? 1 : 0),
+    lastStatus: status,
+    lastRunAt: now,
+    planSummary: truncate(plan?.summary || base.planSummary || "", 180),
+    stepsPreview: Array.isArray(plan?.steps) ? plan.steps.slice(0, MAX_PLAN_STEPS).map((step) => truncate(step.objective, 100)) : (base.stepsPreview || []),
+    finalSummary: truncate(finalAnswer || base.finalSummary || "", 180),
+    completedObjectives: completedSteps
+      .filter((entry) => entry.verification?.verdict === "complete")
+      .map((entry) => truncate(entry.objective, 100))
+      .slice(-MAX_PLAN_STEPS)
+  };
+
+  if (existing) {
+    Object.assign(existing, next);
+  } else {
+    state.memory.workflows.unshift(next);
+  }
+
+  state.memory.workflows.sort((left, right) => {
+    if ((right.successCount || 0) !== (left.successCount || 0)) {
+      return (right.successCount || 0) - (left.successCount || 0);
+    }
+    return String(right.lastRunAt || "").localeCompare(String(left.lastRunAt || ""));
+  });
+  state.memory.workflows = state.memory.workflows.slice(0, MAX_MEMORY_WORKFLOWS);
+}
+
+function buildRelevantMemoryContext(task, taskId = "") {
+  const domain = extractMemoryDomain(getActiveTab()?.url || "");
+  const activeGoal = state.memory.activeGoal;
+  const taskFingerprint = buildTaskFingerprint(task);
+  const checkpoints = state.memory.checkpoints
+    .filter((entry) =>
+      entry.taskId === taskId ||
+      entry.status === "running" ||
+      entry.status === "blocked" ||
+      (domain && entry.domain === domain) ||
+      taskFingerprintsOverlap(taskFingerprint, entry.task)
+    )
+    .slice(0, 3);
+  const workflows = state.memory.workflows
+    .filter((entry) => (domain && entry.domain === domain) || taskFingerprintsOverlap(taskFingerprint, entry.taskSnippet))
+    .slice(0, 3);
+
+  return {
+    preferences: state.memory.userPreferences.assistant || {},
+    activeGoal,
+    recentDomains: state.memory.recentDomains.slice(0, 5),
+    checkpoints,
+    workflows
+  };
+}
+
+function formatMemoryContext(memoryContext) {
+  const lines = [];
+  const preferences = memoryContext?.preferences || {};
+  if (preferences.preferredModel) {
+    lines.push(`Assistant preferences: model=${preferences.preferredModel} (${preferences.preferredModelCapability || "unknown"}), approval=${preferences.approvalMode || "auto"}, maxIterations=${preferences.maxIterations || DEFAULT_SETTINGS.maxIterations}.`);
+  }
+
+  if (memoryContext?.activeGoal?.task) {
+    lines.push(`Active goal memory: ${memoryContext.activeGoal.task} [${memoryContext.activeGoal.status}]${memoryContext.activeGoal.currentStepObjective ? `; current checkpoint: ${memoryContext.activeGoal.currentStepObjective}` : ""}.`);
+  }
+
+  if (memoryContext?.checkpoints?.length) {
+    lines.push(`Relevant checkpoints: ${memoryContext.checkpoints.map((entry) => `${truncate(entry.task, 80)} [${entry.status}]${entry.currentStepObjective ? ` at ${truncate(entry.currentStepObjective, 80)}` : ""}`).join(" | ")}.`);
+  }
+
+  if (memoryContext?.workflows?.length) {
+    lines.push(`Known workflows: ${memoryContext.workflows.map((entry) => `${entry.taskSnippet}${entry.domain ? ` on ${entry.domain}` : ""} (successes: ${entry.successCount || 0}/${entry.runCount || 0})`).join(" | ")}.`);
+  }
+
+  if (memoryContext?.recentDomains?.length) {
+    lines.push(`Recent domains: ${memoryContext.recentDomains.map((entry) => `${entry.domain} (${entry.visits || 0} visits)`).join(", ")}.`);
+  }
+
+  return lines.length ? lines.join("\n") : "No durable memory stored yet.";
+}
+
+function extractMemoryDomain(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (!/^https?:$/i.test(parsed.protocol)) {
+      return "";
+    }
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function buildTaskFingerprint(task) {
+  return String(task || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2)
+    .filter((token, index, entries) => entries.indexOf(token) === index)
+    .slice(0, MEMORY_TASK_TOKEN_LIMIT)
+    .join(" ");
+}
+
+function taskFingerprintsOverlap(left, right) {
+  const leftTokens = new Set(buildTaskFingerprint(left).split(/\s+/).filter(Boolean));
+  const rightTokens = new Set(buildTaskFingerprint(right).split(/\s+/).filter(Boolean));
+  const overlap = countFingerprintSetOverlap(leftTokens, rightTokens);
+  return overlap >= Math.min(2, leftTokens.size, rightTokens.size);
+}
+
+function countTaskFingerprintOverlap(left, right) {
+  const leftTokens = new Set(buildTaskFingerprint(left).split(/\s+/).filter(Boolean));
+  const rightTokens = new Set(buildTaskFingerprint(right).split(/\s+/).filter(Boolean));
+  return countFingerprintSetOverlap(leftTokens, rightTokens);
+}
+
+function countFingerprintSetOverlap(leftTokens, rightTokens) {
+  if (!leftTokens.size || !rightTokens.size) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap;
 }
 
 function renderState() {
@@ -1302,6 +3601,7 @@ function renderState() {
     : state.lastResult || "Waiting for a task.";
   renderTabs();
   renderConversation();
+  renderTelemetry();
   renderLogs();
   updateBrowserContext();
   window.requestAnimationFrame(updateAgentScrollButtons);
@@ -1563,6 +3863,16 @@ function clampNumber(value, min, max, fallback) {
 function truncate(value, maxLength) {
   const text = String(value || "");
   return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}...`;
+}
+
+function hashString(value) {
+  let hash = 0;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 function levelIcon(level) {

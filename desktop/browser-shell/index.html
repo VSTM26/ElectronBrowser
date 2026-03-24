@@ -152,6 +152,7 @@
 
               <label class="field-label" for="model-select">Model</label>
               <select id="model-select" class="text-input"></select>
+              <p id="model-guidance" class="model-guidance">Vision-capable models are preferred for screenshot grounding.</p>
 
               <div class="settings-grid">
                 <div>
@@ -164,8 +165,41 @@
                 </div>
               </div>
 
+              <label class="field-label" for="trusted-origins-input">Trusted origins</label>
+              <textarea id="trusted-origins-input" rows="4" placeholder="github.com&#10;mail.google.com"></textarea>
+              <p id="policy-guidance" class="policy-guidance">Mutating actions on untrusted or sensitive pages may require approval.</p>
+
               <button id="save-settings-button" class="primary-button wide" type="button">Save settings</button>
               <p id="settings-feedback" class="feedback">Settings are stored locally in this browser.</p>
+            </section>
+
+            <section class="agent-card telemetry-card">
+              <div class="card-header">
+                <div>
+                  <p class="eyebrow">Evaluation</p>
+                  <h2>Telemetry</h2>
+                </div>
+              </div>
+              <div class="telemetry-grid">
+                <div class="telemetry-stat">
+                  <span class="telemetry-label">Task success</span>
+                  <strong id="telemetry-task-success">0%</strong>
+                </div>
+                <div class="telemetry-stat">
+                  <span class="telemetry-label">Step success</span>
+                  <strong id="telemetry-step-success">0%</strong>
+                </div>
+                <div class="telemetry-stat">
+                  <span class="telemetry-label">Approval rate</span>
+                  <strong id="telemetry-approval-rate">0%</strong>
+                </div>
+                <div class="telemetry-stat">
+                  <span class="telemetry-label">Recovery rate</span>
+                  <strong id="telemetry-recovery-rate">0%</strong>
+                </div>
+              </div>
+              <p id="telemetry-workflow-summary" class="telemetry-note">Workflow library is still gathering examples.</p>
+              <p id="telemetry-last-failure" class="telemetry-note">No recorded failures yet.</p>
             </section>
 
             <section class="agent-card activity-card">

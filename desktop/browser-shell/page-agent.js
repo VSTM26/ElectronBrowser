@@ -7,7 +7,6 @@ function installPageAgent() {
   const CURSOR_ID = "local-comet-cursor";
   const CURSOR_STYLE_ID = "local-comet-cursor-style";
   const CURSOR_TARGET_ID = "local-comet-target";
-  let elementCounter = 0;
 
   window.__localCometPageAgent = {
     async run(command) {
@@ -36,6 +35,8 @@ function installPageAgent() {
 
   function buildPageSnapshot(includeText, includeMetadata) {
     const interactiveElements = collectInteractiveElements();
+    const landmarks = collectLandmarks();
+    const forms = collectForms();
     const snapshot = {
       url: window.location.href,
       title: document.title,
@@ -50,12 +51,20 @@ function installPageAgent() {
         atBottom: window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 10
       },
       interactiveElements,
+      landmarks,
+      forms,
       visibleText: includeText ? collectVisibleText() : "",
-      summary: `Found ${interactiveElements.length} interactive elements on ${document.title || window.location.href}.`
+      signature: buildSnapshotSignature({
+        title: document.title,
+        interactiveElements,
+        landmarks,
+        forms
+      }),
+      summary: `Found ${interactiveElements.length} ranked interactive elements, ${landmarks.length} landmarks, and ${forms.length} forms on ${document.title || window.location.href}.`
     };
 
     if (includeMetadata) {
-      snapshot.metadata = collectMetadata();
+      snapshot.metadata = collectMetadata(landmarks, forms);
     }
 
     return snapshot;
@@ -77,21 +86,28 @@ function installPageAgent() {
     ].join(",");
 
     const elements = [];
+    let domOrder = 0;
+
     for (const element of document.querySelectorAll(selector)) {
       if (!isVisible(element)) {
         continue;
       }
 
       const rect = element.getBoundingClientRect();
+      const text = truncate(composeElementText(element), 120);
+      const score = computeElementScore(element, rect, text, domOrder);
       elements.push({
         id: ensureElementId(element),
         tag: element.tagName.toLowerCase(),
         role: element.getAttribute("role") || "",
         type: element.getAttribute("type") || "",
         name: element.getAttribute("name") || "",
-        text: truncate(composeElementText(element), 120),
+        text,
         placeholder: element.getAttribute("placeholder") || "",
         href: element instanceof HTMLAnchorElement ? element.href : "",
+        disabled: isDisabled(element),
+        domPath: buildDomPath(element),
+        score,
         rect: {
           x: Math.round(rect.x),
           y: Math.round(rect.y),
@@ -99,20 +115,108 @@ function installPageAgent() {
           height: Math.round(rect.height)
         }
       });
+      domOrder += 1;
 
       if (elements.length >= 200) {
         break;
       }
     }
 
-    return elements;
+    return elements
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        if (left.rect.y !== right.rect.y) {
+          return left.rect.y - right.rect.y;
+        }
+        if (left.rect.x !== right.rect.x) {
+          return left.rect.x - right.rect.x;
+        }
+        return left.domPath.localeCompare(right.domPath);
+      })
+      .map((entry, index) => ({
+        ...entry,
+        rank: index + 1,
+        score: Number(entry.score.toFixed(2))
+      }));
   }
 
   function collectVisibleText() {
     return truncate((document.body?.innerText || "").replace(/\s+/g, " ").trim(), 8000);
   }
 
-  function collectMetadata() {
+  function collectLandmarks() {
+    const selector = [
+      "main",
+      "nav",
+      "header",
+      "footer",
+      "aside",
+      "section",
+      "form",
+      "[role='banner']",
+      "[role='main']",
+      "[role='navigation']",
+      "[role='contentinfo']",
+      "[role='search']",
+      "[role='complementary']",
+      "[role='region']",
+      "[role='form']"
+    ].join(",");
+
+    return Array.from(document.querySelectorAll(selector))
+      .filter((element) => element instanceof HTMLElement)
+      .filter((element) => isVisible(element) || hasVisibleChildContent(element))
+      .slice(0, 24)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          id: ensureElementId(element),
+          role: normalizeLandmarkRole(element),
+          name: truncate(composeLandmarkName(element), 100),
+          domPath: buildDomPath(element),
+          rect: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          }
+        };
+      });
+  }
+
+  function collectForms() {
+    return Array.from(document.querySelectorAll("form"))
+      .filter((form) => form instanceof HTMLFormElement)
+      .filter((form) => isVisible(form) || hasVisibleInteractiveDescendant(form))
+      .slice(0, 12)
+      .map((form) => {
+        const controls = Array.from(form.querySelectorAll("input, textarea, select, button"))
+          .filter((element) => element instanceof HTMLElement)
+          .filter(isVisible)
+          .slice(0, 24);
+
+        return {
+          id: ensureElementId(form),
+          name: truncate(composeLandmarkName(form), 100),
+          method: (form.getAttribute("method") || "get").toLowerCase(),
+          action: truncate(form.action || "", 160),
+          fieldCount: controls.filter((control) => !(control instanceof HTMLButtonElement)).length,
+          requiredCount: controls.filter((control) => control.hasAttribute("required")).length,
+          submitButtons: controls
+            .filter((control) => control instanceof HTMLButtonElement || (control instanceof HTMLInputElement && /submit|button/i.test(control.type || "")))
+            .slice(0, 4)
+            .map((control) => truncate(composeElementText(control), 80)),
+          fields: controls
+            .filter((control) => !(control instanceof HTMLButtonElement))
+            .slice(0, 12)
+            .map((control) => summarizeFormField(control))
+        };
+      });
+  }
+
+  function collectMetadata(landmarks, forms) {
     return {
       headings: Array.from(document.querySelectorAll("h1, h2, h3"))
         .filter(isVisible)
@@ -128,7 +232,9 @@ function installPageAgent() {
           text: truncate(anchor.textContent?.trim() || "", 80),
           href: anchor.href
         })),
-      pageType: document.querySelector("input[type='password']") ? "login" : "general"
+      landmarkCount: landmarks.length,
+      formCount: forms.length,
+      pageType: classifyPageType(forms)
     };
   }
 
@@ -234,7 +340,7 @@ function installPageAgent() {
 
   function ensureElementId(element) {
     if (!element.hasAttribute(ELEMENT_ATTRIBUTE)) {
-      element.setAttribute(ELEMENT_ATTRIBUTE, `lc-${Date.now().toString(36)}-${++elementCounter}`);
+      element.setAttribute(ELEMENT_ATTRIBUTE, `lc-${hashString(buildElementIdentity(element))}`);
     }
     return element.getAttribute(ELEMENT_ATTRIBUTE);
   }
@@ -259,6 +365,195 @@ function installPageAgent() {
       element instanceof HTMLInputElement ? element.value : "",
       element.textContent
     ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  function summarizeFormField(control) {
+    return {
+      id: ensureElementId(control),
+      tag: control.tagName.toLowerCase(),
+      type: control.getAttribute("type") || "",
+      name: control.getAttribute("name") || "",
+      label: truncate(composeFieldLabel(control), 100),
+      placeholder: truncate(control.getAttribute("placeholder") || "", 80),
+      required: control.hasAttribute("required")
+    };
+  }
+
+  function composeFieldLabel(control) {
+    const htmlFor = control.getAttribute("id");
+    const explicitLabel = htmlFor
+      ? document.querySelector(`label[for="${CSS.escape(htmlFor)}"]`)
+      : control.closest("label");
+
+    return [
+      explicitLabel?.textContent,
+      control.getAttribute("aria-label"),
+      control.getAttribute("name"),
+      control.getAttribute("placeholder")
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  function computeElementScore(element, rect, text, domOrder) {
+    let score = 0;
+    const area = Math.min(rect.width * rect.height, 24000) / 24000;
+    const aboveFold = rect.top >= -20 && rect.top < window.innerHeight;
+    const centerDistance = Math.abs((rect.top + rect.height / 2) - window.innerHeight * 0.4) / Math.max(window.innerHeight, 1);
+
+    if (element instanceof HTMLButtonElement) {
+      score += 34;
+    } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+      score += 30;
+    } else if (element instanceof HTMLAnchorElement) {
+      score += 22;
+    } else {
+      score += 16;
+    }
+
+    if (text) {
+      score += 18;
+    }
+
+    if (element === document.activeElement) {
+      score += 16;
+    }
+
+    if (aboveFold) {
+      score += 16;
+    }
+
+    if (isPrimaryActionElement(element, text)) {
+      score += 14;
+    }
+
+    if (isDisabled(element)) {
+      score -= 24;
+    }
+
+    score += area * 18;
+    score += Math.max(0, 10 - centerDistance * 10);
+    score += Math.max(0, 10 - domOrder * 0.08);
+
+    return score;
+  }
+
+  function isPrimaryActionElement(element, text) {
+    const normalized = String(text || "").toLowerCase();
+    return normalized.includes("continue") ||
+      normalized.includes("submit") ||
+      normalized.includes("search") ||
+      normalized.includes("sign in") ||
+      normalized.includes("log in") ||
+      normalized.includes("next") ||
+      normalized.includes("save") ||
+      normalized.includes("confirm") ||
+      element instanceof HTMLInputElement && /submit|search/i.test(element.type || "");
+  }
+
+  function isDisabled(element) {
+    return element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true";
+  }
+
+  function buildDomPath(element) {
+    const segments = [];
+    let current = element;
+
+    while (current instanceof HTMLElement && segments.length < 8) {
+      const parent = current.parentElement;
+      let position = 1;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === current.tagName);
+        position = Math.max(1, siblings.indexOf(current) + 1);
+      }
+      segments.unshift(`${current.tagName.toLowerCase()}:${position}`);
+      current = parent;
+    }
+
+    return segments.join(">");
+  }
+
+  function buildElementIdentity(element) {
+    return [
+      element.tagName.toLowerCase(),
+      element.getAttribute("role") || "",
+      element.getAttribute("type") || "",
+      element.getAttribute("name") || "",
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("placeholder") || "",
+      element instanceof HTMLAnchorElement ? element.href : "",
+      buildDomPath(element)
+    ].join("|");
+  }
+
+  function composeLandmarkName(element) {
+    return [
+      element.getAttribute("aria-label"),
+      element.getAttribute("aria-labelledby")
+        ? document.getElementById(element.getAttribute("aria-labelledby"))?.textContent
+        : "",
+      element.querySelector("h1, h2, h3, legend")?.textContent,
+      element.getAttribute("name")
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeLandmarkRole(element) {
+    const explicitRole = element.getAttribute("role");
+    if (explicitRole) {
+      return explicitRole;
+    }
+
+    return element.tagName.toLowerCase();
+  }
+
+  function classifyPageType(forms) {
+    const pageText = (document.body?.innerText || "").toLowerCase();
+    if (pageText.includes("captcha") || pageText.includes("recaptcha") || pageText.includes("human verification")) {
+      return "captcha";
+    }
+
+    if (document.querySelector("input[type='password']")) {
+      return "login";
+    }
+
+    if (pageText.includes("sign in") || pageText.includes("log in") || pageText.includes("authentication required")) {
+      return "login";
+    }
+
+    if (forms.some((form) => form.fieldCount >= 2 && form.submitButtons.length)) {
+      return "form";
+    }
+
+    if (document.querySelector("article")) {
+      return "article";
+    }
+
+    return "general";
+  }
+
+  function hasVisibleInteractiveDescendant(element) {
+    return Array.from(element.querySelectorAll("input, textarea, select, button, a[href]")).some(isVisible);
+  }
+
+  function hasVisibleChildContent(element) {
+    return Array.from(element.children).some((child) => child instanceof HTMLElement && isVisible(child));
+  }
+
+  function buildSnapshotSignature({ title, interactiveElements, landmarks, forms }) {
+    return hashString([
+      title || "",
+      interactiveElements.slice(0, 20).map((entry) => `${entry.id}:${entry.rank}:${entry.text}`).join("|"),
+      landmarks.slice(0, 12).map((entry) => `${entry.role}:${entry.name}`).join("|"),
+      forms.slice(0, 8).map((entry) => `${entry.name}:${entry.fieldCount}:${entry.requiredCount}`).join("|")
+    ].join("::"));
+  }
+
+  function hashString(value) {
+    let hash = 0;
+    const text = String(value || "");
+    for (let index = 0; index < text.length; index += 1) {
+      hash = ((hash << 5) - hash) + text.charCodeAt(index);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(36);
   }
 
   function describeElement(element) {

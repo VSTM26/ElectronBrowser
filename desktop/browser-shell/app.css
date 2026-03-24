@@ -735,7 +735,10 @@ select:focus {
 
 .hero-card p:last-child,
 .status-copy,
-.feedback {
+.feedback,
+.model-guidance,
+.policy-guidance,
+.telemetry-note {
   color: var(--text-soft);
   line-height: 1.5;
 }
@@ -784,6 +787,7 @@ select:focus {
 
 .composer-card,
 .settings-card,
+.telemetry-card,
 .activity-card {
   display: flex;
   flex-direction: column;
@@ -892,6 +896,74 @@ select:focus {
 .feedback {
   min-height: 22px;
   margin: 0;
+}
+
+.model-guidance {
+  margin: -2px 0 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(56, 103, 255, 0.08);
+  border: 1px solid rgba(56, 103, 255, 0.12);
+  font-size: 13px;
+}
+
+.model-guidance.vision {
+  color: var(--success);
+  background: rgba(15, 159, 97, 0.08);
+  border-color: rgba(15, 159, 97, 0.14);
+}
+
+.model-guidance.not-preferred {
+  color: var(--warning);
+  background: rgba(181, 71, 8, 0.08);
+  border-color: rgba(181, 71, 8, 0.14);
+}
+
+.policy-guidance,
+.telemetry-note {
+  margin: 0;
+  font-size: 13px;
+}
+
+.policy-guidance {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.policy-guidance.warning {
+  color: var(--warning);
+  background: rgba(181, 71, 8, 0.08);
+  border-color: rgba(181, 71, 8, 0.14);
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.telemetry-stat {
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.telemetry-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.telemetry-stat strong {
+  font-size: 22px;
+  line-height: 1;
 }
 
 .feedback.success {

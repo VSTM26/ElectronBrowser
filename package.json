@@ -6,7 +6,7 @@
   "main": "desktop/main.cjs",
   "scripts": {
     "desktop": "electron desktop/main.cjs",
-    "desktop:smoke": "BROWSER_SMOKE_TEST=1 electron desktop/main.cjs",
+    "desktop:smoke": "node scripts/run-desktop-smoke.mjs",
     "verify:e2e": "node scripts/verify-browser-control.mjs"
   },
   "dependencies": {

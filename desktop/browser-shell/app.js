@@ -290,6 +290,7 @@ const elements = {
   baseUrlInput: document.getElementById("base-url-input"),
   apiKeyInput: document.getElementById("api-key-input"),
   modelSelect: document.getElementById("model-select"),
+  modelCatalog: document.getElementById("model-catalog"),
   modelGuidance: document.getElementById("model-guidance"),
   temperatureInput: document.getElementById("temperature-input"),
   iterationsAutoButton: document.getElementById("iterations-auto-button"),
@@ -455,6 +456,12 @@ function bindEvents() {
   });
   elements.modelSelect.addEventListener("change", () => {
     updateModelGuidance(state.modelCatalog, elements.modelSelect.value);
+    renderModelCatalog(state.modelCatalog, elements.modelSelect.value);
+  });
+  elements.modelSelect.addEventListener("focus", () => {
+    if (state.modelCatalog.length <= 1) {
+      void refreshModels({ silent: true });
+    }
   });
   document.querySelectorAll("[data-close-notice]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1040,11 +1047,15 @@ function toggleSettingsPanel(force) {
     state.preferences.agentPaneOpen = true;
   }
 
-  state.preferences.settingsPanelOpen = typeof force === "boolean"
+  const nextOpen = typeof force === "boolean"
     ? force
     : !state.preferences.settingsPanelOpen;
+  state.preferences.settingsPanelOpen = nextOpen;
   persistPreferences();
   applyLayoutState();
+  if (nextOpen) {
+    void refreshModels({ silent: true });
+  }
 }
 
 function getAgentScrollStep() {
@@ -1123,7 +1134,61 @@ function populateModelOptions(models, selectedModel) {
     elements.modelSelect.append(option);
   }
 
+  renderModelCatalog(entries, selectedModel || entries[0]?.name || "");
   updateModelGuidance(entries, selectedModel || entries[0]?.name || "");
+}
+
+function renderModelCatalog(entries, selectedModel) {
+  elements.modelCatalog.textContent = "";
+
+  if (!Array.isArray(entries) || !entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "model-catalog-empty";
+    empty.textContent = "No local models detected yet. Click Refresh after Ollama is running.";
+    elements.modelCatalog.append(empty);
+    return;
+  }
+
+  const summary = document.createElement("div");
+  summary.className = "model-catalog-summary";
+  summary.textContent = `${entries.length} model${entries.length === 1 ? "" : "s"} detected`;
+  elements.modelCatalog.append(summary);
+
+  const list = document.createElement("div");
+  list.className = "model-catalog-list";
+
+  for (const entry of entries) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `model-catalog-item ${entry.name === selectedModel ? "active" : ""}`;
+    item.setAttribute("aria-pressed", entry.name === selectedModel ? "true" : "false");
+
+    const name = document.createElement("span");
+    name.className = "model-catalog-name";
+    name.textContent = entry.name;
+
+    const badges = document.createElement("span");
+    badges.className = "model-catalog-badges";
+
+    const preferenceBadge = document.createElement("span");
+    preferenceBadge.className = `model-chip ${entry.capability === "preferred" ? "preferred" : "not-preferred"}`;
+    preferenceBadge.textContent = entry.capability === "preferred" ? "Preferred" : "Not preferred";
+
+    const capabilityBadge = document.createElement("span");
+    capabilityBadge.className = "model-chip capability";
+    capabilityBadge.textContent = describeModelCapabilities(entry);
+
+    badges.append(preferenceBadge, capabilityBadge);
+    item.append(name, badges);
+    item.addEventListener("click", () => {
+      elements.modelSelect.value = entry.name;
+      updateModelGuidance(state.modelCatalog, entry.name);
+      renderModelCatalog(state.modelCatalog, entry.name);
+    });
+    list.append(item);
+  }
+
+  elements.modelCatalog.append(list);
 }
 
 function normalizeModelCatalog(models, selectedModel) {
@@ -1303,6 +1368,17 @@ function normalizeModelCapabilities(model) {
 
 function modelSupportsTools(model) {
   return normalizeModelCapabilities(model).has("tools");
+}
+
+function describeModelCapabilities(model) {
+  const labels = [];
+  if (model.supportsVision) {
+    labels.push("Vision");
+  }
+  if (model.supportsTools) {
+    labels.push("Tools");
+  }
+  return labels.length ? labels.join(" + ") : "Basic chat";
 }
 
 function syncAddressBar() {
@@ -4291,10 +4367,11 @@ function startIntroAnimation() {
     return;
   }
 
+  const hideDelayMs = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 900 : 2900;
   overlay.classList.remove("is-hidden");
   window.setTimeout(() => {
     overlay.classList.add("is-hidden");
-  }, 2400);
+  }, hideDelayMs);
 }
 
 function escapeHtml(value) {

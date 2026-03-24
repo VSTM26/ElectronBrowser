@@ -107,7 +107,7 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     if (error.name === "AbortError") {
       throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
     }
-    throw error;
+    throw enrichConnectionError(error, url);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -192,6 +192,30 @@ async function safeReadBody(response) {
 function truncateText(value, maxLength) {
   const text = String(value || "");
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text;
+}
+
+function enrichConnectionError(error, requestUrl) {
+  const causeCode = error?.cause?.code || "";
+  const causeAddress = error?.cause?.address || "";
+  const causePort = error?.cause?.port || "";
+  const baseMessage = String(error?.message || error || "Network request failed.");
+
+  if (causeCode === "ECONNREFUSED") {
+    const endpoint = causeAddress && causePort
+      ? `${causeAddress}:${causePort}`
+      : requestUrl;
+    return new Error(`Cannot reach Ollama at ${endpoint}. Start Ollama with 'ollama serve', or update the Base URL in settings if your server is running elsewhere.`);
+  }
+
+  if (causeCode === "ENOTFOUND") {
+    return new Error(`Could not resolve the Ollama host for ${requestUrl}. Check the Base URL in settings.`);
+  }
+
+  if (/fetch failed/i.test(baseMessage)) {
+    return new Error(`Ollama request failed for ${requestUrl}. Check that the server is running and the Base URL is correct.`);
+  }
+
+  return error instanceof Error ? error : new Error(baseMessage);
 }
 
 function normalizeModelCapabilities(payload, model) {

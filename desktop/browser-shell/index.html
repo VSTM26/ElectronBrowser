@@ -11,20 +11,32 @@
   <body>
     <div id="window-shell" class="window-shell">
       <div id="intro-overlay" class="intro-overlay" aria-hidden="true">
-        <div class="intro-storm">
-          <span class="lightning lightning-a"></span>
-          <span class="lightning lightning-b"></span>
-          <span class="lightning lightning-c"></span>
-          <span class="dust dust-a"></span>
-          <span class="dust dust-b"></span>
-          <span class="dust dust-c"></span>
+        <div class="intro-atmosphere" aria-hidden="true">
+          <span class="intro-orb intro-orb-a"></span>
+          <span class="intro-orb intro-orb-b"></span>
+          <span class="intro-orb intro-orb-c"></span>
+          <span class="intro-beam intro-beam-a"></span>
+          <span class="intro-beam intro-beam-b"></span>
+          <span class="intro-grid"></span>
+          <span class="intro-noise"></span>
         </div>
-        <div class="intro-wordmark">
-          <img class="intro-logo" src="./assets/electron-logo.svg" alt="">
-          <div class="intro-copy">
-            <p class="eyebrow">Ignition sequence</p>
-            <h1>Electron</h1>
-            <p>Local-first browser booting with Ollama on deck.</p>
+        <div class="intro-stage">
+          <div class="intro-frame">
+            <div class="intro-logo-shell" aria-hidden="true">
+              <span class="intro-logo-ripple intro-logo-ripple-a"></span>
+              <span class="intro-logo-ripple intro-logo-ripple-b"></span>
+              <img class="intro-logo" src="./assets/electron-logo.svg" alt="">
+            </div>
+            <div class="intro-copy">
+              <p class="eyebrow">Local browser ignition</p>
+              <h1>Electron</h1>
+              <p class="intro-subtitle">A local-first browser shell with an Ollama-powered copilot, booting into focus.</p>
+            </div>
+          </div>
+          <div class="intro-ticker" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
           </div>
         </div>
       </div>
@@ -168,6 +180,7 @@
 
                 <label class="field-label" for="model-select">Model</label>
                 <select id="model-select" class="text-input"></select>
+                <div id="model-catalog" class="model-catalog" aria-live="polite"></div>
                 <div id="model-guidance" class="notice model-guidance" role="status">
                   <p class="notice-message">Preferred models support both screenshot grounding and tool calling.</p>
                   <button class="notice-close" type="button" data-close-notice="model-guidance" aria-label="Dismiss model guidance">&times;</button>

@@ -103,11 +103,36 @@ function registerIpcHandlers() {
     return { ok: true };
   });
 
-  ipcMain.handle("ollama:list-models", async (_event, settings) => listModels(settings));
-  ipcMain.handle("ollama:test-connection", async (_event, settings) => testConnection(settings));
+  ipcMain.handle("ollama:list-models", async (_event, settings) => {
+    try {
+      return {
+        ok: true,
+        data: await listModels(settings)
+      };
+    } catch (error) {
+      return serializeIpcError(error, "ollama:list-models");
+    }
+  });
+  ipcMain.handle("ollama:test-connection", async (_event, settings) => {
+    try {
+      return {
+        ok: true,
+        data: await testConnection(settings)
+      };
+    } catch (error) {
+      return serializeIpcError(error, "ollama:test-connection");
+    }
+  });
   ipcMain.handle("ollama:chat", async (_event, payload) => {
     const { settings, messages, tools } = payload || {};
-    return chat(settings || {}, messages || [], tools || []);
+    try {
+      return {
+        ok: true,
+        data: await chat(settings || {}, messages || [], tools || [])
+      };
+    } catch (error) {
+      return serializeIpcError(error, "ollama:chat");
+    }
   });
   ipcMain.handle("perception:ocr-screenshot", async (_event, payload) => {
     try {
@@ -121,6 +146,15 @@ function registerIpcHandlers() {
       };
     }
   });
+}
+
+function serializeIpcError(error, channel) {
+  const message = String(error?.message || error || "Unknown IPC error.");
+  console.warn(`[${channel}] ${message}`);
+  return {
+    ok: false,
+    error: message
+  };
 }
 
 function applyAppIcon() {

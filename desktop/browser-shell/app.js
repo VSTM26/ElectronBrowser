@@ -103,13 +103,17 @@ const elements = {
   toggleAgentButton: document.getElementById("toggle-agent-button"),
   introOverlay: document.getElementById("intro-overlay"),
   addressForm: document.getElementById("address-form"),
+  addressChip: document.getElementById("address-chip"),
   addressInput: document.getElementById("address-input"),
+  addressStatus: document.getElementById("address-status"),
   backButton: document.getElementById("back-button"),
   forwardButton: document.getElementById("forward-button"),
   reloadButton: document.getElementById("reload-button"),
   homeButton: document.getElementById("home-button"),
   browserStack: document.getElementById("browser-stack"),
   activePageLabel: document.getElementById("active-page-label"),
+  pageProgress: document.getElementById("page-progress"),
+  pageBadge: document.getElementById("page-badge"),
   agentPane: document.getElementById("agent-pane"),
   agentScrollUpButton: document.getElementById("agent-scroll-up-button"),
   agentScrollDownButton: document.getElementById("agent-scroll-down-button"),
@@ -215,6 +219,12 @@ function bindEvents() {
   elements.addressForm.addEventListener("submit", (event) => {
     event.preventDefault();
     navigateActiveTab(elements.addressInput.value);
+  });
+  elements.addressInput.addEventListener("input", () => {
+    updateAddressMeta(elements.addressInput.value);
+  });
+  elements.addressInput.addEventListener("focus", () => {
+    updateAddressMeta(elements.addressInput.value);
   });
   elements.backButton.addEventListener("click", () => goBack());
   elements.forwardButton.addEventListener("click", () => goForward());
@@ -422,6 +432,12 @@ function renderTabs() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `tab-button ${tab.id === state.activeTabId ? "active" : ""}`;
+    button.title = buildTabButtonTitle(tab);
+    button.setAttribute("aria-label", buildTabButtonTitle(tab));
+
+    const indicator = document.createElement("span");
+    indicator.className = `tab-indicator ${tab.loading ? "loading" : classifyPageBadge(tab.url)}`;
+    indicator.setAttribute("aria-hidden", "true");
 
     const title = document.createElement("span");
     title.className = "tab-title";
@@ -436,7 +452,7 @@ function renderTabs() {
       closeTab(tab.id);
     });
 
-    button.append(title, close);
+    button.append(indicator, title, close);
     button.addEventListener("click", () => selectTab(tab.id));
     elements.tabs.append(button);
   }
@@ -680,12 +696,17 @@ function setFeedback(message, tone) {
 function syncAddressBar() {
   const tab = getActiveTab();
   elements.addressInput.value = formatDisplayUrl(tab?.url || "");
+  updateAddressMeta(elements.addressInput.value);
 }
 
 function updateBrowserContext() {
   const tab = getActiveTab();
   if (!tab) {
     elements.activePageLabel.textContent = "No page loaded yet.";
+    elements.pageBadge.textContent = "No tab";
+    elements.pageBadge.className = "page-badge";
+    elements.pageProgress.classList.remove("active");
+    document.title = "Electron";
     return;
   }
 
@@ -693,9 +714,16 @@ function updateBrowserContext() {
   elements.activePageLabel.textContent = tab.loading
     ? `Loading ${displayUrl || tab.title || "page"}...`
     : `${tab.title || "Untitled"} · ${displayUrl}`;
+  elements.pageBadge.textContent = formatPageBadge(tab.url, tab.loading);
+  elements.pageBadge.className = `page-badge ${classifyPageBadge(tab.url)}${tab.loading ? " loading" : ""}`;
+  elements.pageProgress.classList.toggle("active", tab.loading);
+  document.title = tab.loading
+    ? `Loading ${tab.title || displayUrl || "page"}`
+    : `${tab.title || "Electron"}${displayUrl ? ` - ${displayUrl}` : ""}`;
 
   elements.backButton.disabled = !(tab.domReady && tab.webview?.canGoBack?.());
   elements.forwardButton.disabled = !(tab.domReady && tab.webview?.canGoForward?.());
+  updateAddressMeta(elements.addressInput.value);
 }
 
 function getActiveTab() {
@@ -1411,6 +1439,66 @@ function serializeTab(tab) {
     displayUrl: formatDisplayUrl(tab.url || ""),
     loading: tab.loading === true
   };
+}
+
+function updateAddressMeta(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || trimmed === START_PAGE_DISPLAY_URL || trimmed === START_PAGE_URL) {
+    elements.addressChip.textContent = "Start";
+    elements.addressStatus.textContent = "Jump to the local start page or type a destination.";
+    return;
+  }
+
+  if (isLikelyUrlQuery(trimmed)) {
+    elements.addressChip.textContent = "Address";
+    elements.addressStatus.textContent = "Press Enter to open this destination directly.";
+    return;
+  }
+
+  elements.addressChip.textContent = "Search";
+  elements.addressStatus.textContent = "Press Enter to search Google from the current tab.";
+}
+
+function buildTabButtonTitle(tab) {
+  const title = tab.title || "New tab";
+  const url = formatDisplayUrl(tab.url || "");
+  const status = tab.loading ? "Loading" : formatPageBadge(tab.url, false);
+  return [title, url, status].filter(Boolean).join(" - ");
+}
+
+function formatPageBadge(url, loading) {
+  if (loading) {
+    return "Loading";
+  }
+
+  const kind = classifyPageBadge(url);
+  switch (kind) {
+    case "local":
+      return "Local";
+    case "secure":
+      return "Secure";
+    case "search":
+      return "Search";
+    default:
+      return "Website";
+  }
+}
+
+function classifyPageBadge(url) {
+  const value = String(url || "");
+  if (!value || value === START_PAGE_URL || value === START_PAGE_DISPLAY_URL || value.startsWith("file://")) {
+    return "local";
+  }
+
+  if (value.startsWith("https://www.google.com/search?")) {
+    return "search";
+  }
+
+  if (value.startsWith("https://")) {
+    return "secure";
+  }
+
+  return "web";
 }
 
 function formatDisplayUrl(value) {

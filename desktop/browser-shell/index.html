@@ -58,7 +58,7 @@
           </div>
 
           <label class="address-shell" for="address-input">
-            <span class="address-chip">Search</span>
+            <span id="address-chip" class="address-chip">Search</span>
             <input
               id="address-input"
               class="address-input"
@@ -66,6 +66,7 @@
               spellcheck="false"
               placeholder="Search Google or enter address"
             >
+            <span id="address-status" class="address-status">Press Enter to search or open a URL directly.</span>
           </label>
 
           <button class="primary-button" type="submit">Go</button>
@@ -75,7 +76,16 @@
       <main class="workspace">
         <section class="page-pane">
           <div class="browser-context">
-            <span id="active-page-label">No page loaded yet.</span>
+            <div class="context-copy">
+              <span id="active-page-label">No page loaded yet.</span>
+              <div id="page-progress" class="page-progress" aria-hidden="true">
+                <span class="page-progress-bar"></span>
+              </div>
+            </div>
+            <div class="context-meta">
+              <span id="page-badge" class="page-badge">Start page</span>
+              <span class="shortcut-hint">Cmd/Ctrl + L</span>
+            </div>
           </div>
           <div id="browser-stack" class="browser-stack"></div>
         </section>
